@@ -20,8 +20,6 @@ workflow:
     image: nvcr.io/nvidia/isaac-lab:2.2.0
     command: ["bash"]
     args: ["/tmp/entry.sh"]
-    resource: default
-    lead: true
     environment:
       ACCEPT_EULA: Y
       NO_NUCLEUS: Y
@@ -32,8 +30,18 @@ workflow:
     files:
     - path: /tmp/setup_github_auth.sh
       contents: |-
-        # Configure git to use the PAT for HTTPS clones of ChicyChen/cap-x
-        GH_PAT=$(cat /tmp/github/github-pat)
+        # Configure git to use the PAT for HTTPS clones of ChicyChen/cap-x.
+        # The osmo credential mount creates a single file under /tmp/github
+        # whose name is the credential's *payload key* — not the credential
+        # name. Different creds were set up with different conventions
+        # (github_pat / github-pat), so we just read whatever's in there.
+        echo "[auth] /tmp/github contents: $(ls /tmp/github/ 2>&1)"
+        GH_FILE=$(ls /tmp/github/ 2>/dev/null | head -1)
+        if [ -z "$GH_FILE" ]; then
+          echo "[auth] FATAL: /tmp/github is empty — credential not mounted"
+          exit 1
+        fi
+        GH_PAT=$(cat "/tmp/github/$GH_FILE")
         git config --global credential.helper store
         echo "https://ChicyChen:${GH_PAT}@github.com" > ~/.git-credentials
         git config --global credential.helper 'store --file ~/.git-credentials'
@@ -65,9 +73,13 @@ workflow:
         export CAPX_DIR=$LUSTRE_DIR/cap-x
         export VLM_ORCH_DIR=$LUSTRE_DIR/vlm-orchestrator
 
-        # Tokens used inside the trial.
-        export HF_TOKEN=$(cat /tmp/hf/hf-token)
-        export NVIDIA_API_KEY=$(cat /tmp/nvidia/nvidia-api-key)
+        # Tokens used inside the trial. Same payload-key-vs-name caveat
+        # as for github above — read whatever's in the mounted dir.
+        echo "[auth] /tmp/hf: $(ls /tmp/hf/ 2>&1)  /tmp/nvidia: $(ls /tmp/nvidia/ 2>&1)"
+        HF_FILE=$(ls /tmp/hf/ 2>/dev/null | head -1)
+        NV_FILE=$(ls /tmp/nvidia/ 2>/dev/null | head -1)
+        export HF_TOKEN=$(cat "/tmp/hf/$HF_FILE" 2>/dev/null)
+        export NVIDIA_API_KEY=$(cat "/tmp/nvidia/$NV_FILE" 2>/dev/null)
 
         # ---------------------------------------------------------- #
         # Sync cap-x from the private GitHub repo into Lustre. Pulls
