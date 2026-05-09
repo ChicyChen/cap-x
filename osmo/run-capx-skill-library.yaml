@@ -184,7 +184,7 @@ workflow:
   resources:
     default:
       gpu: 1
-      cpu: 16
+      cpu: 12
       memory: 80Gi
       storage: 80Gi
       platform: ovx-l40
