@@ -79,6 +79,12 @@ libero = [
   "gym==0.25.2",
   "scikit-learn",
 ]
+# Robolab long-horizon baseline. robolab itself depends on Isaac Sim
+# and is installed as an editable local package (e.g. into the
+# robolab conda env which already has Isaac Sim wired up); we don't
+# pin it here. Declare the marker so the conflict block can keep
+# robolab/libero/robosuite mutually exclusive in the same env.
+robolab = []
 robosuite = [
   "robosuite"
 ]
@@ -154,6 +160,14 @@ conflicts = [
   [
     { extra = "molmo" },
     { extra = "verl" },
+  ],
+  [
+    { extra = "robolab" },
+    { extra = "libero" },
+  ],
+  [
+    { extra = "robolab" },
+    { extra = "robosuite" },
   ],
 ]
 

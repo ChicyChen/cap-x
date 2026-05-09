@@ -34,6 +34,10 @@ VLM_MODELS = [
     "google/gemini-2.5-flash-lite",
     "anthropic/claude-opus-4-5",
     "anthropic/claude-haiku-4-5",
+    # NVIDIA-inference-hosted Claude models also accept image inputs.
+    "aws/anthropic/bedrock-claude-opus-4-7",
+    "aws/anthropic/bedrock-claude-sonnet-4-6",
+    "aws/anthropic/bedrock-claude-haiku-4-5",
     "openai/gpt-5.4",
     "openai/o1",
     "openai/o4-mini",

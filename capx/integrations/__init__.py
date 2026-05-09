@@ -24,6 +24,22 @@ except ImportError:
     _libero_available = False
     print("LIBERO not installed, skipping LIBERO APIs")
 
+try:
+    from .franka.robolab_privileged import FrankaRobolabPrivilegedApi
+    # S2/S3/S4 reuse the LIBERO perception classes via inheritance —
+    # they only need to be importable, not LIBERO-installed (LIBERO's
+    # own libero.py files are pure-Python wrappers over SAM3/GraspNet
+    # that don't actually require the LIBERO benchmark to be present).
+    from .franka.robolab_perception import (
+        FrankaRobolabApi,
+        FrankaRobolabApiReduced,
+        FrankaRobolabApiReducedSkillLibrary,
+    )
+    _robolab_available = True
+except ImportError:
+    _robolab_available = False
+    print("Robolab not installed, skipping Robolab APIs")
+
 register_api("FrankaControlPrivilegedApi", FrankaControlPrivilegedApi)
 register_api("FrankaControlApi", lambda env: FrankaControlApi(env, use_sam3=True))
 register_api("FrankaControlApiReduced", FrankaControlApiReduced)
@@ -127,3 +143,14 @@ if _libero_available:
     register_api("FrankaLiberoApi", lambda env: FrankaLiberoApi(env, use_sam3=True))
     register_api("FrankaLiberoApiReduced", FrankaLiberoApiReduced)
     register_api("FrankaLiberoApiReducedSkillLibrary", FrankaLiberoApiReducedSkillLibrary)
+
+if _robolab_available:
+    register_api("FrankaRobolabPrivilegedApi", FrankaRobolabPrivilegedApi)
+    register_api(
+        "FrankaRobolabApi", lambda env: FrankaRobolabApi(env, use_sam3=True)
+    )
+    register_api("FrankaRobolabApiReduced", FrankaRobolabApiReduced)
+    register_api(
+        "FrankaRobolabApiReducedSkillLibrary",
+        FrankaRobolabApiReducedSkillLibrary,
+    )
