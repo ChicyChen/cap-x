@@ -1,0 +1,195 @@
+# CaP-X eval on robolab LH common-sense tasks (osmo).
+#
+# V1 — single task, single episode, single L40 GPU. No Molmo
+# (graceful fallback inside the agent loop). Adds Molmo via a sidecar
+# task in V2.
+#
+# Submit:
+#   osmo workflow submit osmo/run-capx-skill-library.yaml \
+#       --set-string scene_name=InferClearTableTask \
+#       --set trials=1
+#
+# Outputs land on Lustre at:
+#   /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/
+# and are sync-able from the syncer attached to the same osmo pool.
+
+workflow:
+  name: capx-robolab-{{scene_name}}
+  tasks:
+  - name: capx-trial
+    image: nvcr.io/nvidia/isaac-lab:2.2.0
+    command: ["bash"]
+    args: ["/tmp/entry.sh"]
+    lead: true
+    environment:
+      ACCEPT_EULA: Y
+      NO_NUCLEUS: Y
+    credentials:
+      github-pat: /tmp/github
+      hf-token: /tmp/hf
+      nvidia-api-key: /tmp/nvidia
+    files:
+    - path: /tmp/setup_github_auth.sh
+      contents: |-
+        # Configure git to use the PAT for HTTPS clones of ChicyChen/cap-x
+        GH_PAT=$(cat /tmp/github/github-pat)
+        git config --global credential.helper store
+        echo "https://ChicyChen:${GH_PAT}@github.com" > ~/.git-credentials
+        git config --global credential.helper 'store --file ~/.git-credentials'
+
+    - path: /tmp/entry.sh
+      contents: |
+        set -e
+        echo "scene_name : {{scene_name}}"
+        echo "trials     : {{trials}}"
+        echo "user_name  : {{user_name}}"
+        date
+
+        # Hide conflicting Vulkan files before Isaac Sim starts.
+        if [ -e "/usr/share/vulkan" ] && [ -e "/etc/vulkan" ]; then
+          mv /usr/share/vulkan /usr/share/vulkan_hidden
+        fi
+
+        apt update
+        apt install -y openssh-server git tmux vim htop git-lfs iputils-ping ffmpeg
+        mkdir -p /run/sshd
+        echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+        /sbin/sshd
+
+        bash /tmp/setup_github_auth.sh
+
+        export LUSTRE_USER={{user_name}}
+        export LUSTRE_DIR=/mnt/amlfs-04/home/{{user_name}}
+        export ROBOLAB_DIR=$LUSTRE_DIR/robolab
+        export CAPX_DIR=$LUSTRE_DIR/cap-x
+        export VLM_ORCH_DIR=$LUSTRE_DIR/vlm-orchestrator
+
+        # Tokens used inside the trial.
+        export HF_TOKEN=$(cat /tmp/hf/hf-token)
+        export NVIDIA_API_KEY=$(cat /tmp/nvidia/nvidia-api-key)
+
+        # ---------------------------------------------------------- #
+        # Sync cap-x from the private GitHub repo into Lustre. Pulls
+        # the latest main on every run; the Lustre clone persists
+        # across pods so deps don't have to re-install fully.
+        # ---------------------------------------------------------- #
+        if [ ! -d "$CAPX_DIR/.git" ]; then
+          echo "[setup] cloning ChicyChen/cap-x → $CAPX_DIR"
+          git clone --recurse-submodules \
+            https://github.com/ChicyChen/cap-x.git "$CAPX_DIR"
+        else
+          echo "[setup] updating cap-x in $CAPX_DIR"
+          cd "$CAPX_DIR" && git fetch chicychen 2>/dev/null || git fetch origin
+          git reset --hard origin/main 2>/dev/null || git reset --hard main
+          git submodule update --init --recursive
+        fi
+
+        # Robolab and vlm-orchestrator are expected to be on Lustre
+        # already (per robolab's pi05 osmo recipe).
+        if [ ! -d "$ROBOLAB_DIR" ]; then
+          echo "[setup] FATAL: robolab not found at $ROBOLAB_DIR"
+          exit 1
+        fi
+        if [ ! -d "$VLM_ORCH_DIR" ]; then
+          echo "[setup] WARNING: vlm-orchestrator not at $VLM_ORCH_DIR — offline scorer will fail"
+        fi
+
+        # ---------------------------------------------------------- #
+        # Install cap-x into Isaac Sim's Python.
+        # Mirrors the local capx-robolab conda env package set.
+        # ---------------------------------------------------------- #
+        ISAAC_PY=/workspace/isaaclab/_isaac_sim/python.sh
+
+        echo "[install] robolab + cap-x (--no-deps; isaaclab + isaacsim already in container)"
+        cd "$ROBOLAB_DIR"
+        $ISAAC_PY -m pip install --no-deps -e .
+        $ISAAC_PY -m pip install json_numpy pyzmq tyro trimesh==4.5.1
+
+        cd "$CAPX_DIR"
+        $ISAAC_PY -m pip install --no-deps -e .
+        $ISAAC_PY -m pip install --no-build-isolation --no-deps \
+            -e capx/third_party/sam3 \
+            -e capx/third_party/contact_graspnet_pytorch
+        $ISAAC_PY -m pip install \
+            'pyroki @ git+https://github.com/chungmin99/pyroki.git' \
+            viser yourdfpy robot_descriptions open3d msgpack_numpy \
+            iopath 'ftfy==6.1.1' 'timm>=1.0.17' decord pycocotools pyrender \
+            'numpy==1.26.4' 'jax<0.4.30' 'jaxlib<0.4.30' 'websockets==13.1'
+
+        if [ -d "$VLM_ORCH_DIR" ]; then
+          $ISAAC_PY -m pip install --no-deps -e "$VLM_ORCH_DIR"
+        fi
+
+        # ---------------------------------------------------------- #
+        # Start perception servers in background tmux sessions.
+        # SAM3 will pull weights from HF on first run (HF_TOKEN already
+        # exported above for the gated facebook/sam3 repo).
+        # ---------------------------------------------------------- #
+        mkdir -p /tmp/capx_servers
+        export PYTHON_BIN="$ISAAC_PY"
+
+        echo "[servers] launching SAM3 (8114), CGN (8115), PyRoKi (8116)"
+        tmux new-session -d -s sam3 \
+            "$ISAAC_PY -m capx.serving.launch_sam3_server --host 127.0.0.1 --port 8114 --device cuda > /tmp/capx_servers/sam3.log 2>&1; sleep infinity"
+        tmux new-session -d -s cgn \
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $ISAAC_PY -m capx.serving.launch_contact_graspnet_server --host 127.0.0.1 --port 8115 --device cuda > /tmp/capx_servers/cgn.log 2>&1; sleep infinity"
+        tmux new-session -d -s pyroki \
+            "$ISAAC_PY -m capx.serving.launch_pyroki_server --port 8116 --host 127.0.0.1 --robot panda_description --target-link panda_hand > /tmp/capx_servers/pyroki.log 2>&1; sleep infinity"
+
+        # Wait for SAM3 + CGN to bind ports (PyRoKi binds fast). Cap-x
+        # itself also has _start_api_servers but we pre-start so the
+        # YAML's api_servers block is a no-op (it skips already-bound
+        # ports).
+        for port in 8114 8115 8116; do
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
+              echo "[servers] :$port ready (after ${i}0s)"
+              break
+            fi
+            sleep 10
+          done
+        done
+
+        # ---------------------------------------------------------- #
+        # Run ONE trial of ONE scene. Outputs land on Lustre under a
+        # timestamped run dir so multiple submissions don't overwrite.
+        # ---------------------------------------------------------- #
+        RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
+        export RUN_OUTPUT_DIR=$LUSTRE_DIR/capx-results/{{scene_name}}/$RUN_TS
+        mkdir -p "$RUN_OUTPUT_DIR"
+        echo "[run] output_dir: $RUN_OUTPUT_DIR"
+
+        cd "$CAPX_DIR"
+        # Wrapper extracts scene_name from --scene-name flag, sets
+        # output_dir, redirects logs + gt_state staging into the run
+        # tree, runs the offline scorer per-trial.
+        PYTHON="$ISAAC_PY" \
+            ./scripts/run_capx_robolab_eval.sh \
+                --clean \
+                --config env_configs/robolab/franka_robolab_skill_library.yaml \
+                --scene-name {{scene_name}} \
+                --trials {{trials}} \
+                --output-dir "$RUN_OUTPUT_DIR" \
+                || echo "[run] wrapper exited non-zero (eval may have partial results)"
+
+        echo "[done] run dir: $RUN_OUTPUT_DIR"
+        ls -la "$RUN_OUTPUT_DIR" || true
+
+        # Signal osmo we're done.
+        touch /done.txt
+
+        # Linger for a few minutes so a human can `osmo workflow ssh`
+        # in if needed; remove if you'd rather the pod exit quickly.
+        sleep 600
+  resources:
+    default:
+      gpu: 1
+      cpu: 16
+      memory: 80Gi
+      storage: 80Gi
+      platform: ovx-l40
+
+default-values:
+  scene_name: InferClearTableTask
+  trials: 1
+  user_name: siyic
