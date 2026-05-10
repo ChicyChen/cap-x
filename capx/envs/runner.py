@@ -41,7 +41,16 @@ from capx.utils.parallel_eval import run_parallel_with_setup
 # from each task's ``episode_length_s × 10`` so longer LH tasks get more
 # wallclock budget without inflating it for short ones.
 TRIAL_TIMEOUT_SECONDS = 1000
-MAX_TRIAL_RETRIES = 3
+
+# Re-runs of a *single* trial on timeout. Set to 1 so that a trial that
+# hits its wallclock cap is recorded as ``success: false`` and we move
+# on — the agent gets no new context between retries, so re-execution
+# doesn't recover useful trials, it only multiplies the per-trial
+# wallclock budget. The user's ``--trials N`` flag controls episode
+# count separately; that's the right knob for "more attempts on this
+# scene". (Was 3 originally; documented in the per-task-timeout test
+# at osmo_results_test_molmo2_timeout/SUMMARY.md.)
+MAX_TRIAL_RETRIES = 1
 
 
 # ---------------------------------------------------------------------------
