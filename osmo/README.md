@@ -61,6 +61,11 @@ walks `capx-results/*/*/franka_robolab_skill_library/.../trial_*/
 
 ## Notes
 
+- HF model weights (`facebook/sam3`, `allenai/Molmo-7B-D-0924`) are
+  pre-cached on Lustre at `$LUSTRE_DIR/hf_cache` on first run. Without
+  this, SAM3's first-run download (~5 GB) takes longer than the entry
+  script's 10-min port-wait window and the trial timed out before any
+  manipulation happened. Subsequent pods reuse the cache.
 - Cap-x's main process and the SAM3/CGN/PyRoKi servers all share the
   one L40 GPU (~37 GB used at peak; L40 has 48 GB). Adding Molmo will
   likely require either an H100 platform or splitting servers across

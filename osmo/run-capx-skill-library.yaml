@@ -134,9 +134,40 @@ workflow:
         fi
 
         # ---------------------------------------------------------- #
+        # Pre-warm large model weights on Lustre. Without this, the
+        # SAM3 server's first-run hf_hub_download takes >10 min and
+        # the port-wait loop below times out, leaving the trial to
+        # spin on retry/sleep until cap-x's per-trial timeout fires.
+        # Caching to $LUSTRE_DIR/hf_cache makes the download a one-time
+        # cost — subsequent pods read from Lustre and bind in ~30s.
+        # Molmo is fetched too so V2 (Molmo sidecar) doesn't pay the
+        # download on first launch.
+        # ---------------------------------------------------------- #
+        export HF_HOME=$LUSTRE_DIR/hf_cache
+        mkdir -p "$HF_HOME"
+        echo "[predownload] HF_HOME=$HF_HOME (start size: $(du -sh $HF_HOME 2>/dev/null | cut -f1))"
+        # SAM3 is required (V1); Molmo is best-effort (V2 sidecar — if
+        # it fails we still proceed since V1 doesn't run a Molmo server).
+        $ISAAC_PY -c "
+import os, sys
+from huggingface_hub import snapshot_download
+token = os.environ.get('HF_TOKEN')
+print('[predownload] facebook/sam3 (sam3.pt + config.json) ...', flush=True)
+snapshot_download('facebook/sam3', allow_patterns=['sam3.pt', 'config.json'], token=token)
+print('[predownload] facebook/sam3 done.', flush=True)
+try:
+    print('[predownload] allenai/Molmo-7B-D-0924 (full snapshot for V2) ...', flush=True)
+    snapshot_download('allenai/Molmo-7B-D-0924', token=token)
+    print('[predownload] Molmo done.', flush=True)
+except Exception as e:
+    print(f'[predownload] WARNING: Molmo pre-warm failed: {e}', flush=True)
+" || { echo "[predownload] FATAL: SAM3 pre-warm failed"; exit 1; }
+        echo "[predownload] HF_HOME size: $(du -sh $HF_HOME 2>/dev/null | cut -f1)"
+
+        # ---------------------------------------------------------- #
         # Start perception servers in background tmux sessions.
-        # SAM3 will pull weights from HF on first run (HF_TOKEN already
-        # exported above for the gated facebook/sam3 repo).
+        # SAM3 + Molmo weights are pre-cached under $HF_HOME above, so
+        # the servers' hf_hub_download calls are no-op cache hits.
         # ---------------------------------------------------------- #
         mkdir -p /tmp/capx_servers
         export PYTHON_BIN="$ISAAC_PY"
