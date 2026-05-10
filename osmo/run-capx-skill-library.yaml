@@ -61,7 +61,8 @@ workflow:
         # Pre-warm large HF model weights into $HF_HOME (Lustre) so the
         # SAM3 server's first-run hf_hub_download is a cache hit and the
         # entry script's port-wait loop doesn't time out. SAM3 is
-        # mandatory; Molmo is best-effort (V2 only).
+        # mandatory; Molmo2 is the paper-faithful VDM for V2 (Molmo1
+        # left in as a smaller fallback for the local 1×L40 dev box).
         #
         # We disable Xet (chunked-dedup transfer) and use hf_transfer
         # (parallel Rust downloader). On a fresh cache, Xet's per-chunk
@@ -80,16 +81,13 @@ workflow:
             max_workers=8,
         )
         print("[predownload] facebook/sam3 done.", flush=True)
-        try:
-            print("[predownload] allenai/Molmo-7B-D-0924 (full, for V2) ...", flush=True)
-            snapshot_download(
-                "allenai/Molmo-7B-D-0924",
-                token=token,
-                max_workers=8,
-            )
-            print("[predownload] Molmo done.", flush=True)
-        except Exception as e:
-            print(f"[predownload] WARNING: Molmo pre-warm failed: {e}", flush=True)
+        for repo in ("allenai/Molmo2-8B", "allenai/Molmo-7B-D-0924"):
+            try:
+                print(f"[predownload] {repo} ...", flush=True)
+                snapshot_download(repo, token=token, max_workers=8)
+                print(f"[predownload] {repo} done.", flush=True)
+            except Exception as e:
+                print(f"[predownload] WARNING: {repo} pre-warm failed: {e}", flush=True)
 
     - path: /tmp/entry.sh
       contents: |
@@ -260,10 +258,12 @@ workflow:
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
         echo "[run] batch={{batch_name}} run_ts=$RUN_TS trials={{trials}}"
 
-        # Wrapper timeout: cap-x's per-trial timeout is 1000s. With
-        # `--trials N` running sequentially, the wrapper's wallclock cap
-        # has to cover N × 1000s plus startup/shutdown overhead.
-        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 300 ))
+        # Wrapper timeout: cap-x's per-trial timeout is now per-task
+        # (`episode_length_s × 10`, set by the robolab adapter — up to
+        # ~1800s for 180s LH common-sense tasks). The wrapper just has
+        # to cover the worst-case scene; defensive only since cap-x's
+        # internal timeout fires first when needed.
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * 2000 + 600 ))
 
         case "{{batch_name}}" in
           capx-cs-batch-0)
@@ -292,6 +292,12 @@ workflow:
             SCENE_ARR=(RecoverNonFoodInBinTask) ;;
           gap-kit-balance-bins)
             SCENE_ARR=(KitBalanceBinsTask) ;;
+          test-molmo2-timeout)
+            # Min/max episode_length_s test: KitFruitUtensilTask is 90s
+            # (shortest) and InferConsolidateTask is 180s (longest) in
+            # the LH common-sense suite. Verifies trial_timeout_s scales
+            # with the task class. Also exercises Molmo2 pre-warm.
+            SCENE_ARR=(KitFruitUtensilTask InferConsolidateTask) ;;
           *)
             echo "[run] FATAL: unknown batch_name '{{batch_name}}' — see osmo/run-capx-skill-library.yaml"
             exit 1 ;;

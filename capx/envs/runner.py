@@ -36,6 +36,10 @@ from capx.utils.parallel_eval import run_parallel_with_setup
 # Constants
 # ---------------------------------------------------------------------------
 
+# Default per-trial wallclock cap. Adapters can override by setting
+# ``trial_timeout_s`` on the env instance; the robolab adapter does this
+# from each task's ``episode_length_s × 10`` so longer LH tasks get more
+# wallclock budget without inflating it for short ones.
 TRIAL_TIMEOUT_SECONDS = 1000
 MAX_TRIAL_RETRIES = 3
 
@@ -200,6 +204,7 @@ def _run_trial_with_retries(
     multi_turn_prompt: str | None,
 ) -> TrialSummary:
     """Attempt a trial up to MAX_TRIAL_RETRIES times, retrying on timeout."""
+    timeout_s = getattr(env, "trial_timeout_s", None) or TRIAL_TIMEOUT_SECONDS
     for attempt in range(MAX_TRIAL_RETRIES):
         try:
             is_last_attempt = attempt == MAX_TRIAL_RETRIES - 1
@@ -209,7 +214,7 @@ def _run_trial_with_retries(
                 args=args,
                 config=config,
                 multi_turn_prompt=multi_turn_prompt,
-                timeout_s=TRIAL_TIMEOUT_SECONDS,
+                timeout_s=timeout_s,
                 raise_on_timeout=not is_last_attempt,
             )
         except TimeoutError:
