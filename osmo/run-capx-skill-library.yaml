@@ -97,7 +97,14 @@ workflow:
         apt update
         apt install -y openssh-server git tmux vim htop git-lfs iputils-ping ffmpeg
         mkdir -p /run/sshd
+        # Mirror syncer yaml: enable empty-password root login so
+        # `osmo workflow port-forward <wf> capx-trial --port :22` lets
+        # us debug the live pod (read /tmp/capx_servers/sam3.log etc).
+        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/#PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
         echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+        echo 'PermitEmptyPasswords yes' >> /etc/ssh/sshd_config
+        passwd -d root
         /sbin/sshd
 
         bash /tmp/setup_github_auth.sh
@@ -163,7 +170,7 @@ workflow:
             viser yourdfpy robot_descriptions open3d msgpack_numpy \
             iopath 'ftfy==6.1.1' 'timm>=1.0.17' decord pycocotools pyrender \
             'numpy==1.26.4' 'jax<0.4.30' 'jaxlib<0.4.30' 'websockets==13.1' \
-            hf_transfer
+            'protobuf<4.21' hf_transfer
 
         if [ -d "$VLM_ORCH_DIR" ]; then
           $ISAAC_PY -m pip install --no-deps -e "$VLM_ORCH_DIR"
@@ -241,6 +248,14 @@ workflow:
 
         echo "[done] run dir: $RUN_OUTPUT_DIR"
         ls -la "$RUN_OUTPUT_DIR" || true
+
+        # Persist tmux server logs into the run dir so SAM3/CGN/PyRoKi
+        # failures are debuggable post-hoc from Lustre (the pod is gone
+        # by then). Each is 100s of KB at most.
+        if [ -d /tmp/capx_servers ]; then
+          mkdir -p "$RUN_OUTPUT_DIR/_servers"
+          cp -v /tmp/capx_servers/*.log "$RUN_OUTPUT_DIR/_servers/" 2>/dev/null || true
+        fi
 
         # Signal osmo we're done.
         touch /done.txt
