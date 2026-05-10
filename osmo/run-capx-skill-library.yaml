@@ -5,15 +5,18 @@
 # scenes in the pod. Pass `scenes` as a comma-separated list and
 # `batch_name` for the workflow name.
 #
-# Submit (3 scenes × 3 trials per pod). Note the colon separator —
-# osmo's --set-string parses commas as list separators between
-# multiple SET_STRINGs, which truncates a CSV scene list to its first
-# entry. Use ':' between scene names instead:
+# Submit one of the predefined LH common-sense batches. Scene lists
+# live in entry.sh's case statement (osmo's CLI eats both ',' and ':'
+# from --set-string values, so passing a scene list as a parameter
+# doesn't work — the case stmt is keyed off batch_name instead).
+#
 #   osmo workflow submit osmo/run-capx-skill-library.yaml \
 #       --pool isaac-srl-l40-04 \
-#       --set-string scenes=InferClearTableTask:InferConsolidateTask:InferJoinGroupTask \
-#       --set-string batch_name=batch-0 \
+#       --set-string batch_name=capx-cs-batch-0 \
 #       --set trials=3
+#
+# Available batch_name values: capx-cs-batch-{0..9} (3 scenes each,
+# 30 LH common-sense scenes total) and `smoke` (just InferClearTableTask).
 #
 # Outputs land on Lustre at:
 #   /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/
@@ -92,7 +95,6 @@ workflow:
       contents: |
         set -e
         echo "batch_name : {{batch_name}}"
-        echo "scenes     : {{scenes}}"
         echo "trials     : {{trials}}"
         echo "user_name  : {{user_name}}"
         date
@@ -248,16 +250,49 @@ workflow:
         # Per-scene output dirs are isolated under capx-results/<scene>/
         # so cap-x's launcher (and the wrapper's `--clean`) don't trip
         # over each other.
+        #
+        # Scene list is keyed by batch_name. Tried passing scenes via
+        # `--set-string scenes=...` first, but osmo's CLI eats both `,`
+        # and `:` from the value (truncating to the first scene); this
+        # case-stmt lookup keeps the YAML single-source-of-truth and
+        # only requires osmo to ferry one token (batch_name).
         # ---------------------------------------------------------- #
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
-        echo "[run] batch={{batch_name}} run_ts=$RUN_TS scenes={{scenes}} trials={{trials}}"
+        echo "[run] batch={{batch_name}} run_ts=$RUN_TS trials={{trials}}"
 
         # Wrapper timeout: cap-x's per-trial timeout is 1000s. With
         # `--trials N` running sequentially, the wrapper's wallclock cap
         # has to cover N × 1000s plus startup/shutdown overhead.
         WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 300 ))
 
-        IFS=':' read -ra SCENE_ARR <<< "{{scenes}}"
+        case "{{batch_name}}" in
+          capx-cs-batch-0)
+            SCENE_ARR=(InferClearTableTask InferConsolidateTask InferJoinGroupTask) ;;
+          capx-cs-batch-1)
+            SCENE_ARR=(InferMajorityGroupTask InferReturnStrayTask InferShelfFallenTask) ;;
+          capx-cs-batch-2)
+            SCENE_ARR=(InferTripleSortTask KitBalanceBinsTask KitCanFruitPairTask) ;;
+          capx-cs-batch-3)
+            SCENE_ARR=(KitEqualFruitsTask KitFruitUtensilTask KitLunchPairsTask) ;;
+          capx-cs-batch-4)
+            SCENE_ARR=(KitShelfRestockTask KitThreeBinsBlocksTask KitUtensilSetsTask) ;;
+          capx-cs-batch-5)
+            SCENE_ARR=(RecoverCanAmongFruitsTask RecoverFallenFruitTask RecoverFruitAmongCansTask) ;;
+          capx-cs-batch-6)
+            SCENE_ARR=(RecoverMisplacedTask RecoverNonFoodInBinTask RecoverSpillTask) ;;
+          capx-cs-batch-7)
+            SCENE_ARR=(RecoverToyInBowlTask RecoverWrongShelfTask SortCannedVeggiesAndFruitsTask) ;;
+          capx-cs-batch-8)
+            SCENE_ARR=(SortCondimentsVsCansTask SortFoodAndUtensilsTask SortFoodVsNonFoodTask) ;;
+          capx-cs-batch-9)
+            SCENE_ARR=(SortForksAndSpoonsTask SortFreshVsCannedTask SortProduceAndDairyTask) ;;
+          smoke)
+            SCENE_ARR=(InferClearTableTask) ;;
+          *)
+            echo "[run] FATAL: unknown batch_name '{{batch_name}}' — see osmo/run-capx-skill-library.yaml"
+            exit 1 ;;
+        esac
+        echo "[run] scenes: ${SCENE_ARR[*]}"
         for scene in "${SCENE_ARR[@]}"; do
           # Trim possible whitespace.
           scene=$(echo "$scene" | xargs)
@@ -305,7 +340,6 @@ workflow:
       platform: ovx-l40
 
 default-values:
-  scenes: InferClearTableTask
   batch_name: smoke
   trials: 1
   user_name: siyic
