@@ -290,6 +290,8 @@ workflow:
             SCENE_ARR=(InferClearTableTask) ;;
           gap-recover-nonfood)
             SCENE_ARR=(RecoverNonFoodInBinTask) ;;
+          gap-kit-balance-bins)
+            SCENE_ARR=(KitBalanceBinsTask) ;;
           *)
             echo "[run] FATAL: unknown batch_name '{{batch_name}}' — see osmo/run-capx-skill-library.yaml"
             exit 1 ;;
