@@ -127,17 +127,27 @@ workflow:
         # Sync cap-x from the private GitHub repo into Lustre. Pulls
         # the latest main on every run; the Lustre clone persists
         # across pods so deps don't have to re-install fully.
+        #
+        # Race-safe: when many pods start simultaneously they all hit
+        # the same .git/index.lock. flock on a sibling lockfile + a
+        # `rm -f .git/index.lock` for stale locks (mirrors the pattern
+        # in robolab's run-eval-pi05 yaml).
         # ---------------------------------------------------------- #
-        if [ ! -d "$CAPX_DIR/.git" ]; then
-          echo "[setup] cloning ChicyChen/cap-x → $CAPX_DIR"
-          git clone --recurse-submodules \
-            https://github.com/ChicyChen/cap-x.git "$CAPX_DIR"
-        else
-          echo "[setup] updating cap-x in $CAPX_DIR"
-          cd "$CAPX_DIR" && git fetch chicychen 2>/dev/null || git fetch origin
-          git reset --hard origin/main 2>/dev/null || git reset --hard main
-          git submodule update --init --recursive
-        fi
+        (
+          flock -x 200
+          if [ ! -d "$CAPX_DIR/.git" ]; then
+            echo "[setup] cloning ChicyChen/cap-x → $CAPX_DIR"
+            git clone --recurse-submodules \
+              https://github.com/ChicyChen/cap-x.git "$CAPX_DIR"
+          else
+            echo "[setup] updating cap-x in $CAPX_DIR"
+            cd "$CAPX_DIR"
+            rm -f .git/index.lock
+            git fetch chicychen 2>/dev/null || git fetch origin
+            git reset --hard origin/main 2>/dev/null || git reset --hard main
+            git submodule update --init --recursive
+          fi
+        ) 200>"$LUSTRE_DIR/.lock-cap-x"
 
         # Robolab and vlm-orchestrator are expected to be on Lustre
         # already (per robolab's pi05 osmo recipe).
