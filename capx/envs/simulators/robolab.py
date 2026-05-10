@@ -109,6 +109,20 @@ class FrankaRobolabEnv(BaseEnv):
         import robolab.constants as _robolab_constants
         _robolab_constants.ENABLE_SUBTASK_PROGRESS_CHECKING = True
 
+        # Force robolab's recorder to write its data.hdf5 to a pod-local
+        # path (default lives under the robolab package dir, which on
+        # osmo points at the SHARED Lustre clone — 10 parallel pods all
+        # writing to the same data.hdf5 collide on HDF5 file locks with
+        # `errno=11 Resource temporarily unavailable` and create_env
+        # raises before any trial runs. /tmp is pod-local; cap-x doesn't
+        # consume data.hdf5 for its scoring (gt_state.jsonl is the
+        # primary signal) so losing it on pod teardown is fine.
+        _capx_data_dir = os.environ.get(
+            "CAPX_ROBOLAB_OUTPUT_DIR", f"/tmp/robolab_output_{os.getpid()}"
+        )
+        os.makedirs(_capx_data_dir, exist_ok=True)
+        _robolab_constants.set_output_dir(_capx_data_dir)
+
         # Inject ``wrist_cam_depth`` into env_cfg.observations.image_obs
         # so cap-x's S2/S3/S4 perception tiers (which expect both
         # cameras to expose depth for multiview point-cloud fusion)
