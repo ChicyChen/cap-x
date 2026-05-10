@@ -1,20 +1,24 @@
 # CaP-X eval on robolab LH common-sense tasks (osmo).
 #
-# V1 — single task, single episode, single L40 GPU. No Molmo
-# (graceful fallback inside the agent loop). Adds Molmo via a sidecar
-# task in V2.
+# Each pod runs N scenes × M trials sequentially on one GPU. Pre-warmed
+# HF cache + persistent SAM3/CGN/PyRoKi servers are shared across all
+# scenes in the pod. Pass `scenes` as a comma-separated list and
+# `batch_name` for the workflow name.
 #
-# Submit:
+# Submit (3 scenes × 3 trials per pod):
 #   osmo workflow submit osmo/run-capx-skill-library.yaml \
-#       --set-string scene_name=InferClearTableTask \
-#       --set trials=1
+#       --pool isaac-srl-l40-04 \
+#       --set-string scenes=InferClearTableTask,InferConsolidateTask,InferJoinGroupTask \
+#       --set-string batch_name=batch-0 \
+#       --set trials=3
 #
 # Outputs land on Lustre at:
 #   /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/
-# and are sync-able from the syncer attached to the same osmo pool.
+# (one dir per scene; all scenes in the same pod share the run_ts).
+# Sync-able from a syncer on the same osmo pool.
 
 workflow:
-  name: capx-robolab-{{scene_name}}
+  name: capx-robolab-{{batch_name}}
   tasks:
   - name: capx-trial
     image: nvcr.io/nvidia/isaac-lab:2.2.0
@@ -84,7 +88,8 @@ workflow:
     - path: /tmp/entry.sh
       contents: |
         set -e
-        echo "scene_name : {{scene_name}}"
+        echo "batch_name : {{batch_name}}"
+        echo "scenes     : {{scenes}}"
         echo "trials     : {{trials}}"
         echo "user_name  : {{user_name}}"
         date
@@ -235,37 +240,46 @@ workflow:
         done
 
         # ---------------------------------------------------------- #
-        # Run ONE trial of ONE scene. Outputs land on Lustre under a
-        # timestamped run dir so multiple submissions don't overwrite.
+        # Loop over scenes in the batch. All scenes share one RUN_TS
+        # so a "batch" is identifiable as all dirs with that suffix.
+        # Per-scene output dirs are isolated under capx-results/<scene>/
+        # so cap-x's launcher (and the wrapper's `--clean`) don't trip
+        # over each other.
         # ---------------------------------------------------------- #
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
-        export RUN_OUTPUT_DIR=$LUSTRE_DIR/capx-results/{{scene_name}}/$RUN_TS
-        mkdir -p "$RUN_OUTPUT_DIR"
-        echo "[run] output_dir: $RUN_OUTPUT_DIR"
+        echo "[run] batch={{batch_name}} run_ts=$RUN_TS scenes={{scenes}} trials={{trials}}"
 
-        cd "$CAPX_DIR"
-        # Wrapper extracts scene_name from --scene-name flag, sets
-        # output_dir, redirects logs + gt_state staging into the run
-        # tree, runs the offline scorer per-trial.
-        PYTHON="$ISAAC_PY" \
-            ./scripts/run_capx_robolab_eval.sh \
-                --clean \
-                --config env_configs/robolab/franka_robolab_skill_library.yaml \
-                --scene-name {{scene_name}} \
-                --trials {{trials}} \
-                --output-dir "$RUN_OUTPUT_DIR" \
-                || echo "[run] wrapper exited non-zero (eval may have partial results)"
+        IFS=',' read -ra SCENE_ARR <<< "{{scenes}}"
+        for scene in "${SCENE_ARR[@]}"; do
+          # Trim possible whitespace.
+          scene=$(echo "$scene" | xargs)
+          RUN_OUTPUT_DIR=$LUSTRE_DIR/capx-results/$scene/$RUN_TS
+          mkdir -p "$RUN_OUTPUT_DIR"
+          echo
+          echo "============================================================"
+          echo "[run] scene=$scene  output_dir=$RUN_OUTPUT_DIR"
+          echo "============================================================"
 
-        echo "[done] run dir: $RUN_OUTPUT_DIR"
-        ls -la "$RUN_OUTPUT_DIR" || true
+          cd "$CAPX_DIR"
+          PYTHON="$ISAAC_PY" \
+              ./scripts/run_capx_robolab_eval.sh \
+                  --clean \
+                  --config env_configs/robolab/franka_robolab_skill_library.yaml \
+                  --scene-name "$scene" \
+                  --trials {{trials}} \
+                  --output-dir "$RUN_OUTPUT_DIR" \
+                  || echo "[run] wrapper exited non-zero for $scene (eval may have partial results)"
 
-        # Persist tmux server logs into the run dir so SAM3/CGN/PyRoKi
-        # failures are debuggable post-hoc from Lustre (the pod is gone
-        # by then). Each is 100s of KB at most.
-        if [ -d /tmp/capx_servers ]; then
-          mkdir -p "$RUN_OUTPUT_DIR/_servers"
-          cp -v /tmp/capx_servers/*.log "$RUN_OUTPUT_DIR/_servers/" 2>/dev/null || true
-        fi
+          echo "[done] $scene → $RUN_OUTPUT_DIR"
+          ls -la "$RUN_OUTPUT_DIR" || true
+
+          # Persist tmux server logs into each scene's run dir so
+          # SAM3/CGN/PyRoKi failures are debuggable post-hoc from Lustre.
+          if [ -d /tmp/capx_servers ]; then
+            mkdir -p "$RUN_OUTPUT_DIR/_servers"
+            cp -v /tmp/capx_servers/*.log "$RUN_OUTPUT_DIR/_servers/" 2>/dev/null || true
+          fi
+        done
 
         # Signal osmo we're done.
         touch /done.txt
@@ -282,6 +296,7 @@ workflow:
       platform: ovx-l40
 
 default-values:
-  scene_name: InferClearTableTask
+  scenes: InferClearTableTask
+  batch_name: smoke
   trials: 1
   user_name: siyic
