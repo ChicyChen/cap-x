@@ -69,20 +69,28 @@ fi
 # pre-mangle path here, then compute the post-mangle path the wrapper
 # uses for log + pending_gt + post-process so all artifacts end up in
 # ONE tree:
-#   outputs/<model>/<config>/<scene>/{launch.log, trial_NN/, ...}
-PRE_MANGLE_OUTPUT_DIR="$OUTPUT_DIR/$SCENE_NAME"
+#   <output-dir>/<model>/<scene>/{launch.log, trial_NN/, ...}
+#
+# Resolve OUTPUT_DIR to an absolute path. When --output-dir is itself
+# absolute (e.g. on osmo: /mnt/amlfs-04/...), prefixing with CAP_X_ROOT
+# would create nonsense like /home/.../cap-x//mnt/amlfs-04/...
+case "$OUTPUT_DIR" in
+  /*) OUTPUT_DIR_ABS="$OUTPUT_DIR" ;;
+  *)  OUTPUT_DIR_ABS="$CAP_X_ROOT/$OUTPUT_DIR" ;;
+esac
+PRE_MANGLE_OUTPUT_DIR="$OUTPUT_DIR_ABS/$SCENE_NAME"
 MODEL_DIR_FRAGMENT="${MODEL//\//_}"
-RESULTS_DIR="${OUTPUT_DIR}/${MODEL_DIR_FRAGMENT}/${SCENE_NAME}"
+RESULTS_DIR="${OUTPUT_DIR_ABS}/${MODEL_DIR_FRAGMENT}/${SCENE_NAME}"
 PENDING_GT_DIR="$RESULTS_DIR/_pending_gt"
 LOG_FILE="$RESULTS_DIR/launch.log"
 
 if [[ "$CLEAN" -eq 1 ]]; then
   echo "[run_capx] cleaning $RESULTS_DIR ..."
-  rm -rf "$CAP_X_ROOT/$RESULTS_DIR" 2>/dev/null || true
-  rm -rf "$CAP_X_ROOT/$PRE_MANGLE_OUTPUT_DIR" 2>/dev/null || true
+  rm -rf "$RESULTS_DIR" 2>/dev/null || true
+  rm -rf "$PRE_MANGLE_OUTPUT_DIR" 2>/dev/null || true
 fi
-mkdir -p "$CAP_X_ROOT/$RESULTS_DIR"
-mkdir -p "$CAP_X_ROOT/$PENDING_GT_DIR"
+mkdir -p "$RESULTS_DIR"
+mkdir -p "$PENDING_GT_DIR"
 
 # Safety: never run two trials in parallel against the same output dir
 # (HDF5 file-lock contention on robolab's recorder).
@@ -103,7 +111,7 @@ echo "[run_capx] launching trial(s) → $LOG_FILE (scene=$SCENE_NAME)"
 # `outputs/<model>/<config>/<scene>/`. CAPX_GT_STATE_DUMP_DIR points the
 # adapter's per-trial gt_state.jsonl staging at the same tree.
 set +e
-CAPX_GT_STATE_DUMP_DIR="$CAP_X_ROOT/$PENDING_GT_DIR" \
+CAPX_GT_STATE_DUMP_DIR="$PENDING_GT_DIR" \
 CAPX_SCENE_NAME="$SCENE_NAME" \
 timeout --kill-after=30 "$TIMEOUT_S" "$PYTHON" -m capx.envs.launch \
     --config-path "$CONFIG" \
@@ -176,12 +184,12 @@ fi
 # LOG_FILE was redirected directly into RESULTS_DIR — no copy needed.
 
 # Drop the empty staging dir if nothing's left in it.
-rmdir "$CAP_X_ROOT/$PENDING_GT_DIR" 2>/dev/null || true
+rmdir "$PENDING_GT_DIR" 2>/dev/null || true
 
 # Remove any stale legacy pre-mangle dir (left over from older runs
 # that staged log + pending_gt outside the model tree).
-[[ -d "$CAP_X_ROOT/$PRE_MANGLE_OUTPUT_DIR" ]] && \
-    rmdir "$CAP_X_ROOT/$PRE_MANGLE_OUTPUT_DIR" 2>/dev/null || true
+[[ -d "$PRE_MANGLE_OUTPUT_DIR" ]] && \
+    rmdir "$PRE_MANGLE_OUTPUT_DIR" 2>/dev/null || true
 
 echo "[run_capx] done. Per-episode artifacts in $RESULTS_DIR/trial_*/"
 exit "$LAUNCH_RC"
