@@ -5,10 +5,13 @@
 # scenes in the pod. Pass `scenes` as a comma-separated list and
 # `batch_name` for the workflow name.
 #
-# Submit (3 scenes × 3 trials per pod):
+# Submit (3 scenes × 3 trials per pod). Note the colon separator —
+# osmo's --set-string parses commas as list separators between
+# multiple SET_STRINGs, which truncates a CSV scene list to its first
+# entry. Use ':' between scene names instead:
 #   osmo workflow submit osmo/run-capx-skill-library.yaml \
 #       --pool isaac-srl-l40-04 \
-#       --set-string scenes=InferClearTableTask,InferConsolidateTask,InferJoinGroupTask \
+#       --set-string scenes=InferClearTableTask:InferConsolidateTask:InferJoinGroupTask \
 #       --set-string batch_name=batch-0 \
 #       --set trials=3
 #
@@ -249,7 +252,12 @@ workflow:
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
         echo "[run] batch={{batch_name}} run_ts=$RUN_TS scenes={{scenes}} trials={{trials}}"
 
-        IFS=',' read -ra SCENE_ARR <<< "{{scenes}}"
+        # Wrapper timeout: cap-x's per-trial timeout is 1000s. With
+        # `--trials N` running sequentially, the wrapper's wallclock cap
+        # has to cover N × 1000s plus startup/shutdown overhead.
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 300 ))
+
+        IFS=':' read -ra SCENE_ARR <<< "{{scenes}}"
         for scene in "${SCENE_ARR[@]}"; do
           # Trim possible whitespace.
           scene=$(echo "$scene" | xargs)
@@ -257,7 +265,7 @@ workflow:
           mkdir -p "$RUN_OUTPUT_DIR"
           echo
           echo "============================================================"
-          echo "[run] scene=$scene  output_dir=$RUN_OUTPUT_DIR"
+          echo "[run] scene=$scene  output_dir=$RUN_OUTPUT_DIR  wrap_timeout=${WRAPPER_TIMEOUT_S}s"
           echo "============================================================"
 
           cd "$CAPX_DIR"
@@ -267,6 +275,7 @@ workflow:
                   --config env_configs/robolab/franka_robolab_skill_library.yaml \
                   --scene-name "$scene" \
                   --trials {{trials}} \
+                  --timeout $WRAPPER_TIMEOUT_S \
                   --output-dir "$RUN_OUTPUT_DIR" \
                   || echo "[run] wrapper exited non-zero for $scene (eval may have partial results)"
 
