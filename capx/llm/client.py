@@ -480,8 +480,8 @@ def query_model_ensemble(
             result = query_model(query_args, copy.deepcopy(prompt))
             return {"model": model, "temp": temp, "content": result["content"], "ok": True}
         except Exception as e:
-            error_msg = str(e)
-            print(f"[Multimodel Ensemble] {model} temp={temp} FAILED: {error_msg}")
+            error_msg = f"{type(e).__name__}: {e}"
+            print(f"[Multimodel Ensemble] {model} temp={temp} FAILED: {error_msg}", flush=True)
             return {"model": model, "temp": temp, "content": error_msg, "ok": False}
 
     # Build all (model, temp) pairs and query in parallel
@@ -497,11 +497,17 @@ def query_model_ensemble(
 
     successful = [r for r in responses if r["ok"]]
     if not successful:
-        # Print all errors for debugging
-        print("\n=== All ensemble queries failed. Errors: ===")
+        # Print all errors for debugging — and embed them in the
+        # RuntimeError too, so they survive stdout buffering when
+        # the wrapper redirects to a log file.
+        print("\n=== All ensemble queries failed. Errors: ===", flush=True)
         for r in responses:
-            print(f"  {r['model']} temp={r['temp']}: {r['content']}")
-        raise RuntimeError("All ensemble queries failed")
+            print(f"  {r['model']} temp={r['temp']}: {r['content']}", flush=True)
+        detail = "; ".join(
+            f"{r['model']} temp={r['temp']}: {r['content'][:200]}"
+            for r in responses
+        )
+        raise RuntimeError(f"All ensemble queries failed. Per-call errors: {detail}")
 
     # Build synthesis prompt
     original_text = ""
