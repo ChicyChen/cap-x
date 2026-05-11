@@ -74,24 +74,24 @@ OPENROUTER_SERVER_URL = "http://localhost:8110/chat/completions"
 # ---------------------------------------------------------------------------
 
 ENSEMBLE_CONFIGS = [
-    # Paper-faithful panel would be 3 different vendors (gpt-5.4 +
-    # gemini-3.1-pro + claude-opus-4-5), but our NVIDIA inference
-    # endpoint key is scoped to `default-models` which only exposes
-    # the two aws/anthropic/bedrock-* Claude variants below. So the
-    # best multimodel ensemble we can run is 2 Claude variants × 3
-    # temperatures = 6 candidates + 1 synthesis call.
-    # Verified accessible via direct curl on 2026-05-11 (the four
-    # paper-panel IDs all returned key_model_access_denied).
-    ("aws/anthropic/bedrock-claude-opus-4-7",   [0.1, 0.5, 0.9]),
-    ("aws/anthropic/bedrock-claude-sonnet-4-6", [0.1, 0.5, 0.9]),
+    # Paper-faithful multimodel panel (CaP-Bench Figure 1): one
+    # frontier model per major vendor × three temperatures = 9
+    # candidates per turn, then one synthesis call.
+    #
+    # NVIDIA inference endpoint exposes these under provider prefixes
+    # (not the bare `openai/...` IDs in older cap-x VLM_MODELS lists).
+    # Verified working via direct curl on 2026-05-11 — `/v1/models`
+    # lists them and chat completions return 200.
+    ("azure/openai/gpt-5.4",                [0.1, 0.5, 0.9]),
+    ("gcp/google/gemini-3.1-pro-preview",   [0.1, 0.5, 0.9]),
+    ("aws/anthropic/claude-opus-4-5",       [0.1, 0.5, 0.9]),
 ]
 
 # Synthesis model — final consolidator over the N candidate responses.
-# Default is opus-4-7 (best single model in our scope). Env-var
-# overridable for users with a wider key scope.
+# Default to gpt-5.4 (paper's choice). Env-var overridable.
 ENSEMBLE_SYNTHESIS_MODEL = os.environ.get(
     "CAPX_ENSEMBLE_SYNTHESIS_MODEL",
-    "aws/anthropic/bedrock-claude-opus-4-7",
+    "azure/openai/gpt-5.4",
 )
 
 # ---------------------------------------------------------------------------
