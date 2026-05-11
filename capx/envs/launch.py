@@ -221,6 +221,16 @@ def main(args: LaunchArgs) -> None:
             import sys
             sys.exit(1)
 
+    # Force-exit BEFORE Python's atexit handlers run. Isaac Sim
+    # registers a destructor at module import that takes 60-90 min on
+    # the Isaac Lab 2.2.0 container — that's the wallclock hang that
+    # caused our osmo wrapper to SIGKILL cap-x mid-scene-3 in several
+    # earlier sweeps. All trial artifacts (trial_NN/, gt_state via
+    # the adapter's per-step dump) are already flushed to disk by
+    # this point; nothing of value is lost.
+    import os
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main(tyro.cli(LaunchArgs))

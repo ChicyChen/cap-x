@@ -304,10 +304,12 @@ workflow:
 
         # Wrapper timeout: cap-x's per-trial timeout is its upstream
         # default of 1000s (TRIAL_TIMEOUT_SECONDS at runner.py:43).
-        # Each scene's wrapper has to cover N trials × 1000s + small
-        # overhead for Isaac-Sim startup/shutdown per trial; defensive
-        # only since cap-x's internal timeout fires first when needed.
-        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 600 ))
+        # cap-x's launch.py force-exits with os._exit(0) after the trial
+        # loop (skipping the Isaac Sim destructor hang), so the wrapper
+        # just has to cover N trials × ~1000s + ~600s setup +
+        # ~600s safety. If a future patch removes the os._exit, bump
+        # this back up substantially to absorb Isaac Sim shutdown.
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 1200 ))
 
         case "{{batch_name}}" in
           cs-batch-0)
