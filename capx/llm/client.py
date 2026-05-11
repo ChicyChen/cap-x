@@ -74,24 +74,24 @@ OPENROUTER_SERVER_URL = "http://localhost:8110/chat/completions"
 # ---------------------------------------------------------------------------
 
 ENSEMBLE_CONFIGS = [
-    # Paper-faithful panel for the parallel-ensemble + multimodel
-    # baseline (CaP-Bench Figure 1): one frontier model per major
-    # vendor × three temperatures = 9 candidates per turn, then one
-    # synthesis call (controlled via CAPX_ENSEMBLE_SYNTHESIS_MODEL).
-    # All three model IDs are in VLM_MODELS above, so they route
-    # through the same NVIDIA inference endpoint cap-x is already
-    # configured against — no extra auth, no OpenRouter proxy.
-    ("openai/gpt-5.4",                [0.1, 0.5, 0.9]),
-    ("google/gemini-3.1-pro-preview", [0.1, 0.5, 0.9]),
-    ("anthropic/claude-opus-4-5",     [0.1, 0.5, 0.9]),
+    # Paper-faithful panel would be 3 different vendors (gpt-5.4 +
+    # gemini-3.1-pro + claude-opus-4-5), but our NVIDIA inference
+    # endpoint key is scoped to `default-models` which only exposes
+    # the two aws/anthropic/bedrock-* Claude variants below. So the
+    # best multimodel ensemble we can run is 2 Claude variants × 3
+    # temperatures = 6 candidates + 1 synthesis call.
+    # Verified accessible via direct curl on 2026-05-11 (the four
+    # paper-panel IDs all returned key_model_access_denied).
+    ("aws/anthropic/bedrock-claude-opus-4-7",   [0.1, 0.5, 0.9]),
+    ("aws/anthropic/bedrock-claude-sonnet-4-6", [0.1, 0.5, 0.9]),
 ]
 
 # Synthesis model — final consolidator over the N candidate responses.
-# Default is openai/gpt-5.4 (paper's choice). Env-var overridable for
-# users whose endpoint only exposes a subset of the panel above.
+# Default is opus-4-7 (best single model in our scope). Env-var
+# overridable for users with a wider key scope.
 ENSEMBLE_SYNTHESIS_MODEL = os.environ.get(
     "CAPX_ENSEMBLE_SYNTHESIS_MODEL",
-    "openai/gpt-5.4",
+    "aws/anthropic/bedrock-claude-opus-4-7",
 )
 
 # ---------------------------------------------------------------------------
