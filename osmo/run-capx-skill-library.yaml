@@ -227,9 +227,30 @@ workflow:
         # Start perception servers in background tmux sessions.
         # SAM3 + Molmo weights are pre-cached under $HF_HOME above, so
         # the servers' hf_hub_download calls are no-op cache hits.
+        #
+        # GPU allocation across the pod's 2 visible GPUs:
+        #   - GPU 0: Isaac Sim + cap-x agent process + SAM3 + CGN
+        #            (~38 GB peak on L40, fits in 48 GB)
+        #   - GPU 1: vllm-serve Molmo2-8B (~22 GB with eager + len 4096)
+        # vllm runs from its own venv (not Isaac Sim's Python) so the
+        # heavy torch/vllm deps don't contaminate the cap-x environment.
         # ---------------------------------------------------------- #
         mkdir -p /tmp/capx_servers
         export PYTHON_BIN="$ISAAC_PY"
+
+        echo "[molmo] building vllm venv at /tmp/molmo_venv (one-time, ~3-5 min)..."
+        python3 -m venv /tmp/molmo_venv
+        /tmp/molmo_venv/bin/pip install --quiet --no-cache-dir vllm hf_transfer 2>&1 | tail -3
+        echo "[molmo] launching vllm serve allenai/Molmo2-8B on :8122 (CUDA_VISIBLE_DEVICES=1)..."
+        tmux new-session -d -s molmo \
+            "HF_HOME=$HF_HOME HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=1 \
+             CUDA_VISIBLE_DEVICES=1 \
+             /tmp/molmo_venv/bin/vllm serve allenai/Molmo2-8B \
+                --host 127.0.0.1 --port 8122 \
+                --trust-remote-code --enforce-eager \
+                --max-model-len 4096 \
+                --gpu-memory-utilization 0.90 \
+                > /tmp/capx_servers/molmo.log 2>&1; sleep infinity"
 
         echo "[servers] launching SAM3 (8114), CGN (8115), PyRoKi (8116)"
         tmux new-session -d -s sam3 \
@@ -239,11 +260,10 @@ workflow:
         tmux new-session -d -s pyroki \
             "$ISAAC_PY -m capx.serving.launch_pyroki_server --port 8116 --host 127.0.0.1 --robot panda_description --target-link panda_hand > /tmp/capx_servers/pyroki.log 2>&1; sleep infinity"
 
-        # Wait for SAM3 + CGN to bind ports (PyRoKi binds fast). Cap-x
-        # itself also has _start_api_servers but we pre-start so the
-        # YAML's api_servers block is a no-op (it skips already-bound
-        # ports).
-        for port in 8114 8115 8116; do
+        # Wait for SAM3 + CGN + PyRoKi (binds fast) + Molmo (slower —
+        # model load on first run can take ~3-5 min after port bind).
+        # 60 × 10s = 10 min cap per port; sufficient.
+        for port in 8114 8115 8116 8122; do
           for i in $(seq 1 60); do
             if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
               echo "[servers] :$port ready (after ${i}0s)"
@@ -362,7 +382,11 @@ workflow:
         sleep 600
   resources:
     default:
-      gpu: 1
+      # 2 GPUs: GPU 0 for Isaac Sim + SAM3 + CGN (~38 GB peak), GPU 1
+      # for vllm-serve Molmo2-8B (~22 GB). On a single L40 (48 GB)
+      # these don't both fit, so each gets its own card via
+      # CUDA_VISIBLE_DEVICES routing in entry.sh.
+      gpu: 2
       cpu: 12
       memory: 80Gi
       storage: 80Gi
