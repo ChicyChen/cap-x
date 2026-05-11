@@ -252,6 +252,7 @@ workflow:
                 --host 127.0.0.1 --port 8122 \
                 --trust-remote-code --enforce-eager \
                 --max-model-len 4096 \
+                --max-num-batched-tokens 32768 \
                 --gpu-memory-utilization 0.90 \
                 > /tmp/capx_servers/molmo.log 2>&1; sleep infinity"
 
