@@ -2,42 +2,39 @@
 #
 # Each pod runs N scenes × M trials sequentially on one GPU. Pre-warmed
 # HF cache + persistent SAM3/CGN/PyRoKi servers are shared across all
-# scenes in the pod. Pass `scenes` as a comma-separated list and
-# `batch_name` for the workflow name.
+# scenes in the pod.
 #
-# Submit one of the predefined LH common-sense batches. Scene lists
-# live in entry.sh's case statement (osmo's CLI eats both ',' and ':'
-# from --set-string values, so passing a scene list as a parameter
-# doesn't work — the case stmt is keyed off batch_name instead).
+# Submit a batch (each batch_name maps to a fixed 3-scene tuple inside
+# entry.sh's case statement — see below for the list). `mode` controls
+# which LLM variant (single Claude vs paper's 3-vendor ensemble) and
+# becomes part of the workflow name so single/ensemble runs are easy
+# to tell apart at a glance:
 #
-#   osmo workflow submit osmo/run-capx-skill-library.yaml \
-#       --pool isaac-srl-l40-04 \
-#       --set-string batch_name=capx-cs-batch-0 \
-#       --set trials=3
+#   single-mode (default — 1 call/turn, claude-opus-4-7):
+#     osmo workflow submit osmo/run-capx-skill-library.yaml \
+#         --pool isaac-srl-l40-04 \
+#         --set-string batch_name=cs-batch-0 \
+#         --set trials=3
+#     → workflow name: capx-robolab-single-cs-batch-0
 #
-# Available batch_name values: capx-cs-batch-{0..9} (3 scenes each,
-# 30 LH common-sense scenes total) and `smoke` (just InferClearTableTask).
+#   ensemble-mode (9 calls/turn — gpt-5.4 + gemini-3.1-pro + claude-opus-4-5,
+#                  3 temps each — + 1 synthesis call):
+#     osmo workflow submit osmo/run-capx-skill-library.yaml \
+#         --pool isaac-srl-l40-04 \
+#         --set-string mode=ensemble batch_name=cs-batch-0 \
+#         --set trial_timeout_multiplier=30 trials=3
+#     → workflow name: capx-robolab-ensemble-cs-batch-0
 #
-# Two baselines (select via config_variant):
-#   - franka_robolab_skill_library            (default; non-ensemble)
-#   - franka_robolab_skill_library_ensemble   (paper-faithful 9-cand)
+# Available batch_name values: cs-batch-{0..9} (3 scenes each,
+# 30 LH common-sense scenes total) and `smoke` (1 scene).
 #
-# Ensemble runs need a longer per-trial budget; bump
-# trial_timeout_multiplier from 10 → 12 (or more) for ensemble sweeps:
-#   osmo workflow submit osmo/run-capx-skill-library.yaml \
-#       --pool isaac-srl-l40-04 \
-#       --set-string batch_name=capx-cs-batch-0 \
-#       --set-string config_variant=franka_robolab_skill_library_ensemble \
-#       --set trial_timeout_multiplier=12 \
-#       --set trials=3
-#
-# Outputs land on Lustre at:
-#   /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/
-# (one dir per scene; all scenes in the same pod share the run_ts).
-# Sync-able from a syncer on the same osmo pool.
+# Outputs land on Lustre at
+# /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/.
+# Ensemble and single runs use different run_ts (submission time)
+# so they coexist on Lustre without overwriting.
 
 workflow:
-  name: capx-robolab-{{batch_name}}
+  name: capx-robolab-{{mode}}-{{batch_name}}
   tasks:
   - name: capx-trial
     image: nvcr.io/nvidia/isaac-lab:2.2.0
@@ -105,6 +102,7 @@ workflow:
     - path: /tmp/entry.sh
       contents: |
         set -e
+        echo "mode       : {{mode}}"
         echo "batch_name : {{batch_name}}"
         echo "trials     : {{trials}}"
         echo "user_name  : {{user_name}}"
@@ -269,7 +267,12 @@ workflow:
         # only requires osmo to ferry one token (batch_name).
         # ---------------------------------------------------------- #
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
-        echo "[run] batch={{batch_name}} run_ts=$RUN_TS trials={{trials}} config={{config_variant}}"
+        case "{{mode}}" in
+          single)   CONFIG_VARIANT=franka_robolab_skill_library ;;
+          ensemble) CONFIG_VARIANT=franka_robolab_skill_library_ensemble ;;
+          *)        echo "[run] FATAL: unknown mode={{mode}} (expected 'single' or 'ensemble')"; exit 1 ;;
+        esac
+        echo "[run] mode={{mode}} batch={{batch_name}} run_ts=$RUN_TS trials={{trials}} config=$CONFIG_VARIANT"
 
         # Wrapper timeout: cap-x's per-trial timeout is now per-task
         # (`episode_length_s × MULT`, set by the robolab adapter — up
@@ -282,25 +285,25 @@ workflow:
         WRAPPER_TIMEOUT_S=$(( {{trials}} * (180 * {{trial_timeout_multiplier}} + 300) + 600 ))
 
         case "{{batch_name}}" in
-          capx-cs-batch-0)
+          cs-batch-0)
             SCENE_ARR=(InferClearTableTask InferConsolidateTask InferJoinGroupTask) ;;
-          capx-cs-batch-1)
+          cs-batch-1)
             SCENE_ARR=(InferMajorityGroupTask InferReturnStrayTask InferShelfFallenTask) ;;
-          capx-cs-batch-2)
+          cs-batch-2)
             SCENE_ARR=(InferTripleSortTask KitBalanceBinsTask KitCanFruitPairTask) ;;
-          capx-cs-batch-3)
+          cs-batch-3)
             SCENE_ARR=(KitEqualFruitsTask KitFruitUtensilTask KitLunchPairsTask) ;;
-          capx-cs-batch-4)
+          cs-batch-4)
             SCENE_ARR=(KitShelfRestockTask KitThreeBinsBlocksTask KitUtensilSetsTask) ;;
-          capx-cs-batch-5)
+          cs-batch-5)
             SCENE_ARR=(RecoverCanAmongFruitsTask RecoverFallenFruitTask RecoverFruitAmongCansTask) ;;
-          capx-cs-batch-6)
+          cs-batch-6)
             SCENE_ARR=(RecoverMisplacedTask RecoverNonFoodInBinTask RecoverSpillTask) ;;
-          capx-cs-batch-7)
+          cs-batch-7)
             SCENE_ARR=(RecoverToyInBowlTask RecoverWrongShelfTask SortCannedVeggiesAndFruitsTask) ;;
-          capx-cs-batch-8)
+          cs-batch-8)
             SCENE_ARR=(SortCondimentsVsCansTask SortFoodAndUtensilsTask SortFoodVsNonFoodTask) ;;
-          capx-cs-batch-9)
+          cs-batch-9)
             SCENE_ARR=(SortForksAndSpoonsTask SortFreshVsCannedTask SortProduceAndDairyTask) ;;
           smoke)
             SCENE_ARR=(InferClearTableTask) ;;
@@ -333,7 +336,7 @@ workflow:
           PYTHON="$ISAAC_PY" \
               ./scripts/run_capx_robolab_eval.sh \
                   --clean \
-                  --config env_configs/robolab/{{config_variant}}.yaml \
+                  --config env_configs/robolab/${CONFIG_VARIANT}.yaml \
                   --scene-name "$scene" \
                   --trials {{trials}} \
                   --timeout $WRAPPER_TIMEOUT_S \
@@ -366,8 +369,8 @@ workflow:
       platform: ovx-l40
 
 default-values:
+  mode: single
   batch_name: smoke
   trials: 1
   user_name: siyic
-  config_variant: franka_robolab_skill_library
   trial_timeout_multiplier: 10

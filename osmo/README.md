@@ -46,16 +46,17 @@ osmo pool the job ran on (per the
 
 ## Ensemble baseline (paper-faithful)
 
-Same osmo yaml; flip two flags via the config_variant parameter and
-bump the per-trial timeout multiplier.
+Same osmo yaml; pass `mode=ensemble` and bump
+`trial_timeout_multiplier`. Single-mode and ensemble-mode jobs use
+distinct workflow-name prefixes (`single-…` / `ensemble-…`) so they're
+trivial to tell apart in `osmo workflow list`.
 
 ```bash
 osmo workflow submit osmo/run-capx-skill-library.yaml \
     --pool isaac-srl-l40-04 \
-    --set-string batch_name=capx-cs-batch-0 \
-    --set-string config_variant=franka_robolab_skill_library_ensemble \
-    --set trial_timeout_multiplier=12 \
-    --set trials=3
+    --set-string mode=ensemble batch_name=cs-batch-0 \
+    --set trial_timeout_multiplier=30 trials=3
+# → workflow name: capx-robolab-ensemble-cs-batch-0
 ```
 
 The ensemble panel lives in `capx/llm/client.py:ENSEMBLE_CONFIGS`:
