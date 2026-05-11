@@ -114,7 +114,10 @@ workflow:
         fi
 
         apt update
-        apt install -y openssh-server git tmux vim htop git-lfs iputils-ping ffmpeg
+        # python3-venv: needed to build the isolated vllm venv for the
+        # Molmo2 sidecar on GPU 1 (Isaac Lab 2.2.0 container ships
+        # python3.10 but not the venv submodule by default).
+        apt install -y openssh-server git tmux vim htop git-lfs iputils-ping ffmpeg python3-venv
         mkdir -p /run/sshd
         # Mirror syncer yaml: enable empty-password root login so
         # `osmo workflow port-forward <wf> capx-trial --port :22` lets
