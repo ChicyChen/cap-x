@@ -74,11 +74,25 @@ OPENROUTER_SERVER_URL = "http://localhost:8110/chat/completions"
 # ---------------------------------------------------------------------------
 
 ENSEMBLE_CONFIGS = [
-    # Gemini-3-Pro only — best single model per CaP-Bench (Figure 1).
-    # 3 temps for diversity; synthesis still uses Gemini-3-Pro.
-    # ~45% faster than full multimodel (no Claude/GPT latency bottleneck).
-    ("openai/gpt-5.4", [0.1, 0.5, 0.9]),
+    # Paper-faithful panel for the parallel-ensemble + multimodel
+    # baseline (CaP-Bench Figure 1): one frontier model per major
+    # vendor × three temperatures = 9 candidates per turn, then one
+    # synthesis call (controlled via CAPX_ENSEMBLE_SYNTHESIS_MODEL).
+    # All three model IDs are in VLM_MODELS above, so they route
+    # through the same NVIDIA inference endpoint cap-x is already
+    # configured against — no extra auth, no OpenRouter proxy.
+    ("openai/gpt-5.4",                [0.1, 0.5, 0.9]),
+    ("google/gemini-3.1-pro-preview", [0.1, 0.5, 0.9]),
+    ("anthropic/claude-opus-4-5",     [0.1, 0.5, 0.9]),
 ]
+
+# Synthesis model — final consolidator over the N candidate responses.
+# Default is openai/gpt-5.4 (paper's choice). Env-var overridable for
+# users whose endpoint only exposes a subset of the panel above.
+ENSEMBLE_SYNTHESIS_MODEL = os.environ.get(
+    "CAPX_ENSEMBLE_SYNTHESIS_MODEL",
+    "openai/gpt-5.4",
+)
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -441,10 +455,17 @@ def query_model_streaming(
 def query_model_ensemble(
     args: "LaunchArgs | ModelQueryArgs",
     prompt: list[dict],
-    synthesis_model: str = "openai/gpt-5.4",
+    synthesis_model: str | None = None,
     is_multiturn = False
 ) -> dict[str, Any]:
-    """Query 9 models (3 models x 3 temperatures) and synthesize final output."""
+    """Query N models × M temperatures and synthesize the final output.
+
+    ``synthesis_model`` defaults to ``ENSEMBLE_SYNTHESIS_MODEL``
+    (env-var overridable via ``CAPX_ENSEMBLE_SYNTHESIS_MODEL``); pass
+    explicitly to use a different consolidator per call.
+    """
+    if synthesis_model is None:
+        synthesis_model = ENSEMBLE_SYNTHESIS_MODEL
 
     def query_single(model: str, temp: float) -> dict:
         query_args = ModelQueryArgs(

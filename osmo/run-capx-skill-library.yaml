@@ -18,6 +18,19 @@
 # Available batch_name values: capx-cs-batch-{0..9} (3 scenes each,
 # 30 LH common-sense scenes total) and `smoke` (just InferClearTableTask).
 #
+# Two baselines (select via config_variant):
+#   - franka_robolab_skill_library            (default; non-ensemble)
+#   - franka_robolab_skill_library_ensemble   (paper-faithful 9-cand)
+#
+# Ensemble runs need a longer per-trial budget; bump
+# trial_timeout_multiplier from 10 → 12 (or more) for ensemble sweeps:
+#   osmo workflow submit osmo/run-capx-skill-library.yaml \
+#       --pool isaac-srl-l40-04 \
+#       --set-string batch_name=capx-cs-batch-0 \
+#       --set-string config_variant=franka_robolab_skill_library_ensemble \
+#       --set trial_timeout_multiplier=12 \
+#       --set trials=3
+#
 # Outputs land on Lustre at:
 #   /mnt/amlfs-04/home/{{user_name}}/capx-results/<scene>/<run_ts>/
 # (one dir per scene; all scenes in the same pod share the run_ts).
@@ -256,14 +269,17 @@ workflow:
         # only requires osmo to ferry one token (batch_name).
         # ---------------------------------------------------------- #
         RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
-        echo "[run] batch={{batch_name}} run_ts=$RUN_TS trials={{trials}}"
+        echo "[run] batch={{batch_name}} run_ts=$RUN_TS trials={{trials}} config={{config_variant}}"
 
         # Wrapper timeout: cap-x's per-trial timeout is now per-task
-        # (`episode_length_s × 10`, set by the robolab adapter — up to
-        # ~1800s for 180s LH common-sense tasks). The wrapper just has
-        # to cover the worst-case scene; defensive only since cap-x's
-        # internal timeout fires first when needed.
-        WRAPPER_TIMEOUT_S=$(( {{trials}} * 2000 + 600 ))
+        # (`episode_length_s × MULT`, set by the robolab adapter — up
+        # to ~1800s with MULT=10 for 180s LH common-sense tasks).
+        # The wrapper just has to cover the worst-case scene; defensive
+        # only since cap-x's internal timeout fires first when needed.
+        # Bumped multiplier for ensemble runs (~2× wallclock per turn);
+        # default is 10, parametrized below.
+        export CAPX_TRIAL_TIMEOUT_MULTIPLIER={{trial_timeout_multiplier}}
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * (180 * {{trial_timeout_multiplier}} + 300) + 600 ))
 
         case "{{batch_name}}" in
           capx-cs-batch-0)
@@ -317,7 +333,7 @@ workflow:
           PYTHON="$ISAAC_PY" \
               ./scripts/run_capx_robolab_eval.sh \
                   --clean \
-                  --config env_configs/robolab/franka_robolab_skill_library.yaml \
+                  --config env_configs/robolab/{{config_variant}}.yaml \
                   --scene-name "$scene" \
                   --trials {{trials}} \
                   --timeout $WRAPPER_TIMEOUT_S \
@@ -353,3 +369,5 @@ default-values:
   batch_name: smoke
   trials: 1
   user_name: siyic
+  config_variant: franka_robolab_skill_library
+  trial_timeout_multiplier: 10

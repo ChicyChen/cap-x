@@ -1,0 +1,125 @@
+# S4 + M2 + M3 + parallel ensemble + multimodel — paper-faithful
+# CaP-Agent0 baseline on robolab LH. Identical to
+# franka_robolab_skill_library.yaml except `use_parallel_ensemble`
+# and `use_multimodel` are flipped to true; the model panel lives in
+# capx/llm/client.py:ENSEMBLE_CONFIGS (gpt-5.4 + gemini-3.1-pro +
+# claude-opus-4-5, 3 temps each → 9 candidates per turn). Synthesis
+# defaults to openai/gpt-5.4 (override via CAPX_ENSEMBLE_SYNTHESIS_MODEL).
+#
+# Cost: ~10× API spend per turn (9 candidate calls + 1 synthesis).
+# Wallclock per turn ~1.5-2× since candidate calls run in parallel.
+# Set CAPX_TRIAL_TIMEOUT_MULTIPLIER=12+ on the entry script so the
+# per-task `trial_timeout_s` has headroom for the ensemble overhead.
+#
+# Usage:
+#   conda activate capx-robolab
+#   ./scripts/run_capx_robolab_eval.sh \
+#       --clean \
+#       --config env_configs/robolab/franka_robolab_skill_library_ensemble.yaml \
+#       --trials 1
+
+env:
+  _target_: capx.envs.tasks.franka.franka_libero_env.FrankaLiberoCodeEnv
+  cfg:
+    _target_: capx.envs.tasks.base.CodeExecEnvConfig
+    low_level:
+      _target_: capx.envs.simulators.robolab.FrankaRobolabTask
+      scene_name: InferClearTableTask
+      instruction_type: default
+      max_steps: 4000
+      device: cuda:0
+      gt_state_dump_dir: ./outputs/franka_robolab_skill_library/_pending_gt
+      record_video: true
+      video_subsample: 4
+    privileged: false
+    enable_render: false
+    apis:
+      - FrankaRobolabApiReducedSkillLibrary
+    prompt: |
+      You are controlling a Franka Emika robot via Python code execution.
+
+      Goal: {libero_environment_goal}
+
+      OUTPUT FORMAT (STRICT — your response will be parsed mechanically):
+      Respond with exactly one Python code block wrapped in triple-backtick
+      fences carrying the `python` language tag:
+
+      ```python
+      # your code here
+      ```
+
+      - Do NOT write natural-language explanation outside the code block;
+        all reasoning belongs in `#` comments inside the code block.
+      - The API functions documented below are already imported into the
+        execution namespace. You only need explicit `import` statements
+        for third-party libraries (e.g. `import numpy as np`).
+
+      After your code executes, you will see the resulting observation
+      and may emit additional code to continue the task.
+
+    multi_turn_prompt: |
+      The following code blocks were just executed:
+      ```python
+      {executed_code}
+      ```
+      The current console stdout is:
+      ```
+      {console_stdout}
+      ```
+      The current console stderr is:
+      ```
+      {console_stderr}
+      ```
+      If there were no errors during compilation or execution, the console
+      stderr will be empty.  If there were errors, consider regenerating.
+
+      Respond with EXACTLY ONE of:
+      - `REGENERATE` followed by new Python code in a fenced ```python ... ```
+        block to continue making progress on the task.
+      - `FINISH` if the task appears to be complete.
+
+api_servers:
+  - _target_: capx.serving.launch_pyroki_server.main
+    port: 8116
+    host: 127.0.0.1
+    robot: panda_description
+    target_link: panda_hand
+
+  - _target_: capx.serving.launch_sam3_server.main
+    device: cuda
+    port: 8114
+    host: 127.0.0.1
+
+  - _target_: capx.serving.launch_contact_graspnet_server.main
+    port: 8115
+    host: 127.0.0.1
+
+record_video: true
+output_dir: ./outputs/franka_robolab_skill_library_ensemble
+
+# Mirror franka_libero_cap_agent0.yaml minus parallel/ensemble:
+#   - M2 (text multi-turn) via prompt + multi_turn_prompt above
+#   - M3 (visual differencing): use_img_differencing=true → a separate
+#     VDM describes the scene / per-turn diff to the code-gen model
+#     in text (same path cap-agent0 uses).
+#   - use_visual_feedback OFF — cap-agent0 doesn't inject raw images
+#     into the code-gen prompt; that's a separate modality not used
+#     in the paper's headline baseline.
+#   - M4 video differencing OFF.
+#   - Parallel ensemble + multimodel OFF (your selected difference
+#     from the paper baseline).
+use_visual_feedback: false
+use_img_differencing: true
+use_video_differencing: false
+use_wrist_camera: false
+use_parallel_ensemble: true
+use_multimodel: true
+
+visual_differencing_model: aws/anthropic/bedrock-claude-opus-4-7
+visual_differencing_model_server_url: https://inference-api.nvidia.com/v1/chat/completions
+# api_key is supplied via the wrapper script's
+# --visual-differencing-model-api-key flag (env-var expansion happens
+# in the shell, not in cap-x's YAML loader).
+
+trials: 1
+num_workers: 1

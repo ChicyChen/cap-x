@@ -44,6 +44,48 @@ Sync results to your local machine via the syncer attached to the same
 osmo pool the job ran on (per the
 [Osmo pools and syncers](../../vlm-orchestrator/CLAUDE.md) note).
 
+## Ensemble baseline (paper-faithful)
+
+Same osmo yaml; flip two flags via the config_variant parameter and
+bump the per-trial timeout multiplier.
+
+```bash
+osmo workflow submit osmo/run-capx-skill-library.yaml \
+    --pool isaac-srl-l40-04 \
+    --set-string batch_name=capx-cs-batch-0 \
+    --set-string config_variant=franka_robolab_skill_library_ensemble \
+    --set trial_timeout_multiplier=12 \
+    --set trials=3
+```
+
+The ensemble panel lives in `capx/llm/client.py:ENSEMBLE_CONFIGS`:
+
+| Vendor | Model | Temperatures |
+|---|---|---|
+| OpenAI | `openai/gpt-5.4` | 0.1, 0.5, 0.9 |
+| Google | `google/gemini-3.1-pro-preview` | 0.1, 0.5, 0.9 |
+| Anthropic | `anthropic/claude-opus-4-5` | 0.1, 0.5, 0.9 |
+
+9 candidates per turn → 1 synthesis call. Synthesis defaults to
+`openai/gpt-5.4`; override with `CAPX_ENSEMBLE_SYNTHESIS_MODEL`.
+
+**Cost:** ~10× API spend per turn vs the non-ensemble baseline (9
+candidates + 1 synthesis). **Wallclock:** ~1.5–2× per turn (candidate
+calls go in parallel via thread pool). `trial_timeout_multiplier=12`
+gives a 90 s task → 1080 s wallclock budget per trial, a 180 s task →
+2160 s — both with comfortable headroom.
+
+Output landing dir is distinct from the non-ensemble baseline so the
+two can coexist on Lustre:
+```
+/mnt/amlfs-04/home/<user>/capx-results/<scene>/<run_ts>/
+└── aws_anthropic_bedrock-claude-opus-4-7/
+    └── <scene>/...
+```
+The model dir name reflects the launch CLI's `--model` flag, not the
+ensemble panel; per-turn `all_responses.json` captures the 9 candidate
+responses plus the synthesis output.
+
 ## V2 (planned): + Molmo sidecar
 
 Add a second task running `vllm serve allenai/Molmo-7B-D-0924
