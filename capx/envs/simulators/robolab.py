@@ -157,20 +157,6 @@ class FrankaRobolabEnv(BaseEnv):
         except (AttributeError, TypeError):
             pass
 
-        # Per-task wallclock budget for cap-x's runner. Robolab defines
-        # ``episode_length_s`` on each LH task class (90 / 120 / 180 s
-        # sim time across the LH common-sense suite). The 10× multiplier
-        # covers Isaac Sim render time + cap-x agent code-gen latency
-        # (measured ~9× on InferClearTableTask in run-8). Override via
-        # CAPX_TRIAL_TIMEOUT_MULTIPLIER for sweeps that hit the cap.
-        _eps_len = float(getattr(self.env_cfg, "episode_length_s", 120))
-        _mult = float(os.environ.get("CAPX_TRIAL_TIMEOUT_MULTIPLIER", "10"))
-        self.trial_timeout_s = int(_eps_len * _mult)
-        print(
-            f"[capx-robolab] scene={scene_name} episode_length_s={_eps_len:.0f} "
-            f"× {_mult:.1f} → trial_timeout_s={self.trial_timeout_s}",
-            flush=True,
-        )
 
         # GT state exporter — single source of truth for object poses
         # in this adapter; also used to populate the per-step dump that

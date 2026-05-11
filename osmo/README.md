@@ -55,7 +55,7 @@ trivial to tell apart in `osmo workflow list`.
 osmo workflow submit osmo/run-capx-skill-library.yaml \
     --pool isaac-srl-l40-04 \
     --set-string mode=ensemble batch_name=cs-batch-0 \
-    --set trial_timeout_multiplier=30 trials=3
+    --set trials=3
 # → workflow name: capx-robolab-ensemble-cs-batch-0
 ```
 

@@ -22,7 +22,7 @@
 #     osmo workflow submit osmo/run-capx-skill-library.yaml \
 #         --pool isaac-srl-l40-04 \
 #         --set-string mode=ensemble batch_name=cs-batch-0 \
-#         --set trial_timeout_multiplier=30 trials=3
+#         --set trials=3
 #     → workflow name: capx-robolab-ensemble-cs-batch-0
 #
 # Available batch_name values: cs-batch-{0..9} (3 scenes each,
@@ -302,15 +302,12 @@ workflow:
         esac
         echo "[run] mode={{mode}} batch={{batch_name}} run_ts=$RUN_TS trials={{trials}} config=$CONFIG_VARIANT"
 
-        # Wrapper timeout: cap-x's per-trial timeout is now per-task
-        # (`episode_length_s × MULT`, set by the robolab adapter — up
-        # to ~1800s with MULT=10 for 180s LH common-sense tasks).
-        # The wrapper just has to cover the worst-case scene; defensive
+        # Wrapper timeout: cap-x's per-trial timeout is its upstream
+        # default of 1000s (TRIAL_TIMEOUT_SECONDS at runner.py:43).
+        # Each scene's wrapper has to cover N trials × 1000s + small
+        # overhead for Isaac-Sim startup/shutdown per trial; defensive
         # only since cap-x's internal timeout fires first when needed.
-        # Bumped multiplier for ensemble runs (~2× wallclock per turn);
-        # default is 10, parametrized below.
-        export CAPX_TRIAL_TIMEOUT_MULTIPLIER={{trial_timeout_multiplier}}
-        WRAPPER_TIMEOUT_S=$(( {{trials}} * (180 * {{trial_timeout_multiplier}} + 300) + 600 ))
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 600 ))
 
         case "{{batch_name}}" in
           cs-batch-0)
@@ -405,4 +402,3 @@ default-values:
   batch_name: smoke
   trials: 1
   user_name: siyic
-  trial_timeout_multiplier: 10
