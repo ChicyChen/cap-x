@@ -1,0 +1,111 @@
+# S4 + M2 + M3 — single-model CaP-Agent0 baseline on the robolab
+# benchmark suite with VAGUE instructions (--instruction-type vague).
+# Identical to franka_robolab_skill_library.yaml except for
+# instruction_type and output_dir (kept separate so vague + default
+# runs don't share trial dirs).
+#
+# Robolab benchmark tasks define `instruction` as a dict
+# ({default, vague, specific}); FrankaRobolabTask forwards
+# instruction_type through to robolab's create_env which calls
+# resolve_instruction() — so this YAML toggle is the entire change
+# required to swap the LLM prompt onto the vague variant.
+#
+# Usage:
+#   conda activate capx-robolab
+#   ./scripts/run_capx_robolab_eval.sh \
+#       --clean \
+#       --config env_configs/robolab/franka_robolab_skill_library_vague.yaml \
+#       --scene-name CleanUpToysTask \
+#       --trials 1
+
+env:
+  _target_: capx.envs.tasks.franka.franka_libero_env.FrankaLiberoCodeEnv
+  cfg:
+    _target_: capx.envs.tasks.base.CodeExecEnvConfig
+    low_level:
+      _target_: capx.envs.simulators.robolab.FrankaRobolabTask
+      scene_name: CleanUpToysTask
+      instruction_type: vague
+      max_steps: 4000
+      device: cuda:0
+      gt_state_dump_dir: ./outputs/franka_robolab_skill_library_vague/_pending_gt
+      record_video: true
+      video_subsample: 4
+    privileged: false
+    enable_render: false
+    apis:
+      - FrankaRobolabApiReducedSkillLibrary
+    prompt: |
+      You are controlling a Franka Emika robot via Python code execution.
+
+      Goal: {libero_environment_goal}
+
+      OUTPUT FORMAT (STRICT — your response will be parsed mechanically):
+      Respond with exactly one Python code block wrapped in triple-backtick
+      fences carrying the `python` language tag:
+
+      ```python
+      # your code here
+      ```
+
+      - Do NOT write natural-language explanation outside the code block;
+        all reasoning belongs in `#` comments inside the code block.
+      - The API functions documented below are already imported into the
+        execution namespace. You only need explicit `import` statements
+        for third-party libraries (e.g. `import numpy as np`).
+
+      After your code executes, you will see the resulting observation
+      and may emit additional code to continue the task.
+
+    multi_turn_prompt: |
+      The following code blocks were just executed:
+      ```python
+      {executed_code}
+      ```
+      The current console stdout is:
+      ```
+      {console_stdout}
+      ```
+      The current console stderr is:
+      ```
+      {console_stderr}
+      ```
+      If there were no errors during compilation or execution, the console
+      stderr will be empty.  If there were errors, consider regenerating.
+
+      Respond with EXACTLY ONE of:
+      - `REGENERATE` followed by new Python code in a fenced ```python ... ```
+        block to continue making progress on the task.
+      - `FINISH` if the task appears to be complete.
+
+api_servers:
+  - _target_: capx.serving.launch_pyroki_server.main
+    port: 8116
+    host: 127.0.0.1
+    robot: panda_description
+    target_link: panda_hand
+
+  - _target_: capx.serving.launch_sam3_server.main
+    device: cuda
+    port: 8114
+    host: 127.0.0.1
+
+  - _target_: capx.serving.launch_contact_graspnet_server.main
+    port: 8115
+    host: 127.0.0.1
+
+record_video: true
+output_dir: ./outputs/franka_robolab_skill_library_vague
+
+use_visual_feedback: false
+use_img_differencing: true
+use_video_differencing: false
+use_wrist_camera: false
+use_parallel_ensemble: false
+use_multimodel: false
+
+visual_differencing_model: aws/anthropic/bedrock-claude-opus-4-7
+visual_differencing_model_server_url: https://inference-api.nvidia.com/v1/chat/completions
+
+trials: 1
+num_workers: 1
