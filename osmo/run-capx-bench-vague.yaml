@@ -33,6 +33,10 @@ workflow:
     environment:
       ACCEPT_EULA: Y
       NO_NUCLEUS: Y
+      # Bench tasks live under robolab/tasks/benchmark/; override cap-x's
+      # default LH-CS-only registration so create_env("CleanUpToysTask")
+      # resolves. Comma-separate to register multiple subdirs.
+      CAPX_ROBOLAB_TASK_DIRS: benchmark
     credentials:
       github-pat: /tmp/github
       hf-token: /tmp/hf

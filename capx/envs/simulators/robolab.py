@@ -801,8 +801,15 @@ _OPENGL_TO_OPENCV_LOCAL = np.array(
 
 _ISAAC_SIM_APP = None
 _ROBOLAB_TASKS_REGISTERED: set[str] = set()
-_DEFAULT_ROBOLAB_TASK_DIRS = (
-    "long_horizon/common_sense",
+# Robolab subdirs auto-registered by `_bootstrap_isaac_sim`. Override via the
+# `CAPX_ROBOLAB_TASK_DIRS` env var (comma-separated) for non-LH suites — e.g.
+# `CAPX_ROBOLAB_TASK_DIRS=benchmark` for the 120-task bench-vague sweep.
+_DEFAULT_ROBOLAB_TASK_DIRS = tuple(
+    d.strip()
+    for d in os.environ.get(
+        "CAPX_ROBOLAB_TASK_DIRS", "long_horizon/common_sense"
+    ).split(",")
+    if d.strip()
 )
 _PARSE_ENV_CFG_PATCHED = False
 _TRIAL_VIDEO_DIR_PATCHED = False
