@@ -91,7 +91,12 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        from vlm_orchestrator.diagnostics.task_failure_logger import TaskFailureLogger
+        # vlm_orchestrator renamed `task_failure_logger` → `metrics1_failure_logger`
+        # in 2026-05. Keep the old path as a fallback for stale Lustre checkouts.
+        try:
+            from vlm_orchestrator.diagnostics.metrics1_failure_logger import TaskFailureLogger
+        except ModuleNotFoundError:
+            from vlm_orchestrator.diagnostics.task_failure_logger import TaskFailureLogger
     except ImportError as e:
         print(
             "vlm-orchestrator not importable. Install it editable into this venv:\n"
