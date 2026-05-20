@@ -42,9 +42,18 @@ workflow:
       CAPX_ROBOLAB_TASK_DIRS: long_horizon/world_knowledge
     credentials:
       github-pat: /tmp/github
+      gitlab-pat: /tmp/gitlab
       hf-token: /tmp/hf
       nvidia-api-key: /tmp/nvidia
     files:
+    - path: /tmp/setup_gitlab_auth.sh
+      contents: |-
+        # Configure git to use the gitlab PAT for cloning xuningy/robolab.
+        GITLAB_PAT=$(cat /tmp/gitlab/gitlab-pat 2>/dev/null)
+        if [ -n "$GITLAB_PAT" ]; then
+          git config --global credential.helper store
+          echo "https://token:${GITLAB_PAT}@gitlab-master.nvidia.com" > ~/.git-credentials
+        fi
     - path: /tmp/setup_github_auth.sh
       contents: |-
         echo "[auth] /tmp/github contents: $(ls /tmp/github/ 2>&1)"
@@ -134,10 +143,24 @@ workflow:
           fi
         ) 200>"$LUSTRE_DIR/.lock-cap-x"
 
-        if [ ! -d "$ROBOLAB_DIR" ]; then
-          echo "[setup] FATAL: robolab not found at $ROBOLAB_DIR"
-          exit 1
-        fi
+        # Clone/fetch robolab fresh from gitlab so siyi/own_exps tip
+        # (incl. today's WK predicate fixes 009ab1e1 / bf0a29fa / 1a820d07)
+        # lands on AMLFS without requiring a manual sync from the user's
+        # laptop. Mirrors the vlm-orchestrator/osmo/lh-cs-*.yaml pattern.
+        bash /tmp/setup_gitlab_auth.sh
+        (
+          flock -x 200
+          if [ ! -d "$ROBOLAB_DIR/.git" ]; then
+            cd $LUSTRE_DIR
+            git clone https://gitlab-master.nvidia.com/xuningy/robolab.git
+          fi
+          cd $ROBOLAB_DIR
+          rm -f .git/index.lock
+          git fetch origin siyi/own_exps
+          git checkout -f siyi/own_exps
+          git reset --hard origin/siyi/own_exps
+        ) 200>"$LUSTRE_DIR/.lock-robolab"
+        echo "[setup] robolab commit: $(cd $ROBOLAB_DIR && git log --oneline -1)"
         if [ ! -d "$VLM_ORCH_DIR" ]; then
           echo "[setup] WARNING: vlm-orchestrator not at $VLM_ORCH_DIR — offline scorer will fail"
         fi
