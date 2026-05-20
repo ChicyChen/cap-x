@@ -1,0 +1,288 @@
+# CaP-X eval on robolab LH-COMPLEX-REFERENCES (xr) tasks (osmo).
+#
+# Mirrors run-capx-bench-vague.yaml but:
+#   - dispatches across the 32-task long_horizon/complex_references suite,
+#     split into 4 batches (xr-batch-{0..3}: Spatial/Counting/Negation/Size+Sort);
+#   - selects the LH-CS skill_library configs (non-vague — xr tasks
+#     have their own natural-language instructions);
+#   - registers long_horizon/complex_references via CAPX_ROBOLAB_TASK_DIRS.
+#
+# Submit (single, 3 trials/task):
+#   osmo workflow submit osmo/run-capx-xr.yaml \
+#       --pool isaac-srl-l40-04 \
+#       --set-string batch_name=xr-batch-0 \
+#       --set trials=3
+#   → workflow name: capx-xr-single-xr-batch-0
+#
+# Submit (ensemble, 3 trials/task — ~10× LLM cost):
+#   osmo workflow submit osmo/run-capx-xr.yaml \
+#       --pool isaac-srl-l40-04 \
+#       --set-string mode=ensemble batch_name=xr-batch-0 \
+#       --set trials=3
+#
+# Outputs land on Lustre at
+#   /mnt/amlfs-04/home/{{user_name}}/capx-xr-results/<scene>/<run_ts>/.
+# Kept disjoint from the LH-CS / bench-vague trees so the dashboard
+# aggregator can pivot the suites independently.
+
+workflow:
+  name: capx-xr-{{mode}}-{{batch_name}}
+  tasks:
+  - name: capx-trial
+    image: nvcr.io/nvidia/isaac-lab:2.2.0
+    command: ["bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      ACCEPT_EULA: Y
+      NO_NUCLEUS: Y
+      # LH-complex_references tasks live under
+      # robolab/tasks/long_horizon/complex_references/; override cap-x's
+      # default LH-CS-only registration so the task classes resolve.
+      # Comma-separate to register multiple subdirs.
+      CAPX_ROBOLAB_TASK_DIRS: long_horizon/complex_references
+    credentials:
+      github-pat: /tmp/github
+      hf-token: /tmp/hf
+      nvidia-api-key: /tmp/nvidia
+    files:
+    - path: /tmp/setup_github_auth.sh
+      contents: |-
+        echo "[auth] /tmp/github contents: $(ls /tmp/github/ 2>&1)"
+        GH_FILE=$(ls /tmp/github/ 2>/dev/null | head -1)
+        if [ -z "$GH_FILE" ]; then
+          echo "[auth] FATAL: /tmp/github is empty — credential not mounted"
+          exit 1
+        fi
+        GH_PAT=$(cat "/tmp/github/$GH_FILE")
+        git config --global credential.helper store
+        echo "https://ChicyChen:${GH_PAT}@github.com" > ~/.git-credentials
+        git config --global credential.helper 'store --file ~/.git-credentials'
+
+    - path: /tmp/predownload_models.py
+      contents: |-
+        import os
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        from huggingface_hub import snapshot_download
+        token = os.environ.get("HF_TOKEN")
+        print("[predownload] facebook/sam3 (sam3.pt + config.json) ...", flush=True)
+        snapshot_download(
+            "facebook/sam3",
+            allow_patterns=["sam3.pt", "config.json"],
+            token=token,
+            max_workers=8,
+        )
+        print("[predownload] facebook/sam3 done.", flush=True)
+        for repo in ("allenai/Molmo2-8B", "allenai/Molmo-7B-D-0924"):
+            try:
+                print(f"[predownload] {repo} ...", flush=True)
+                snapshot_download(repo, token=token, max_workers=8)
+                print(f"[predownload] {repo} done.", flush=True)
+            except Exception as e:
+                print(f"[predownload] WARNING: {repo} pre-warm failed: {e}", flush=True)
+
+    - path: /tmp/entry.sh
+      contents: |
+        set -e
+        echo "mode       : {{mode}}"
+        echo "batch_name : {{batch_name}}"
+        echo "trials     : {{trials}}"
+        echo "user_name  : {{user_name}}"
+        date
+
+        if [ -e "/usr/share/vulkan" ] && [ -e "/etc/vulkan" ]; then
+          mv /usr/share/vulkan /usr/share/vulkan_hidden
+        fi
+
+        apt update
+        apt install -y openssh-server git tmux vim htop git-lfs iputils-ping ffmpeg python3-venv python3-dev build-essential
+        mkdir -p /run/sshd
+        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/#PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
+        echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+        echo 'PermitEmptyPasswords yes' >> /etc/ssh/sshd_config
+        passwd -d root
+        /sbin/sshd
+
+        bash /tmp/setup_github_auth.sh
+
+        export LUSTRE_USER={{user_name}}
+        export LUSTRE_DIR=/mnt/amlfs-04/home/{{user_name}}
+        export ROBOLAB_DIR=$LUSTRE_DIR/robolab
+        export CAPX_DIR=$LUSTRE_DIR/cap-x
+        export VLM_ORCH_DIR=$LUSTRE_DIR/vlm-orchestrator
+
+        echo "[auth] /tmp/hf: $(ls /tmp/hf/ 2>&1)  /tmp/nvidia: $(ls /tmp/nvidia/ 2>&1)"
+        HF_FILE=$(ls /tmp/hf/ 2>/dev/null | head -1)
+        NV_FILE=$(ls /tmp/nvidia/ 2>/dev/null | head -1)
+        export HF_TOKEN=$(cat "/tmp/hf/$HF_FILE" 2>/dev/null)
+        export NVIDIA_API_KEY=$(cat "/tmp/nvidia/$NV_FILE" 2>/dev/null)
+
+        (
+          flock -x 200
+          if [ ! -d "$CAPX_DIR/.git" ]; then
+            echo "[setup] cloning ChicyChen/cap-x → $CAPX_DIR"
+            git clone --recurse-submodules \
+              https://github.com/ChicyChen/cap-x.git "$CAPX_DIR"
+          else
+            echo "[setup] updating cap-x in $CAPX_DIR"
+            cd "$CAPX_DIR"
+            rm -f .git/index.lock
+            git fetch chicychen 2>/dev/null || git fetch origin
+            git reset --hard origin/main 2>/dev/null || git reset --hard main
+            git submodule update --init --recursive
+          fi
+        ) 200>"$LUSTRE_DIR/.lock-cap-x"
+
+        if [ ! -d "$ROBOLAB_DIR" ]; then
+          echo "[setup] FATAL: robolab not found at $ROBOLAB_DIR"
+          exit 1
+        fi
+        if [ ! -d "$VLM_ORCH_DIR" ]; then
+          echo "[setup] WARNING: vlm-orchestrator not at $VLM_ORCH_DIR — offline scorer will fail"
+        fi
+
+        ISAAC_PY=/workspace/isaaclab/_isaac_sim/python.sh
+
+        echo "[install] robolab + cap-x (--no-deps; isaaclab + isaacsim already in container)"
+        cd "$ROBOLAB_DIR"
+        $ISAAC_PY -m pip install --no-deps -e .
+        $ISAAC_PY -m pip install json_numpy pyzmq tyro trimesh==4.5.1
+
+        cd "$CAPX_DIR"
+        $ISAAC_PY -m pip install --no-deps -e .
+        $ISAAC_PY -m pip install --no-build-isolation --no-deps \
+            -e capx/third_party/sam3 \
+            -e capx/third_party/contact_graspnet_pytorch
+        $ISAAC_PY -m pip install \
+            'pyroki @ git+https://github.com/chungmin99/pyroki.git' \
+            viser yourdfpy robot_descriptions open3d msgpack_numpy \
+            iopath 'ftfy==6.1.1' 'timm>=1.0.17' decord pycocotools pyrender \
+            'numpy==1.26.4' 'jax<0.4.30' 'jaxlib<0.4.30' 'websockets==13.1' \
+            'protobuf<4.21' hf_transfer
+
+        if [ -d "$VLM_ORCH_DIR" ]; then
+          $ISAAC_PY -m pip install --no-deps -e "$VLM_ORCH_DIR"
+        fi
+
+        export HF_HOME=$LUSTRE_DIR/hf_cache
+        mkdir -p "$HF_HOME"
+        echo "[predownload] HF_HOME=$HF_HOME (start size: $(du -sh $HF_HOME 2>/dev/null | cut -f1))"
+        $ISAAC_PY /tmp/predownload_models.py || { echo "[predownload] FATAL: SAM3 pre-warm failed"; exit 1; }
+        echo "[predownload] HF_HOME size: $(du -sh $HF_HOME 2>/dev/null | cut -f1)"
+
+        mkdir -p /tmp/capx_servers
+        export PYTHON_BIN="$ISAAC_PY"
+
+        echo "[molmo] building vllm venv at /tmp/molmo_venv (one-time, ~3-5 min)..."
+        python3 -m venv /tmp/molmo_venv
+        /tmp/molmo_venv/bin/pip install --quiet --no-cache-dir vllm hf_transfer 2>&1 | tail -3
+        echo "[molmo] launching vllm serve allenai/Molmo2-8B on :8122 (CUDA_VISIBLE_DEVICES=1)..."
+        tmux new-session -d -s molmo \
+            "HF_HOME=$HF_HOME HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=1 \
+             CUDA_VISIBLE_DEVICES=1 \
+             /tmp/molmo_venv/bin/vllm serve allenai/Molmo2-8B \
+                --host 127.0.0.1 --port 8122 \
+                --trust-remote-code --enforce-eager \
+                --max-model-len 4096 \
+                --max-num-batched-tokens 32768 \
+                --gpu-memory-utilization 0.90 \
+                > /tmp/capx_servers/molmo.log 2>&1; sleep infinity"
+
+        echo "[servers] launching SAM3 (8114), CGN (8115), PyRoKi (8116)"
+        tmux new-session -d -s sam3 \
+            "$ISAAC_PY -m capx.serving.launch_sam3_server --host 127.0.0.1 --port 8114 --device cuda > /tmp/capx_servers/sam3.log 2>&1; sleep infinity"
+        tmux new-session -d -s cgn \
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $ISAAC_PY -m capx.serving.launch_contact_graspnet_server --host 127.0.0.1 --port 8115 --device cuda > /tmp/capx_servers/cgn.log 2>&1; sleep infinity"
+        tmux new-session -d -s pyroki \
+            "$ISAAC_PY -m capx.serving.launch_pyroki_server --port 8116 --host 127.0.0.1 --robot panda_description --target-link panda_hand > /tmp/capx_servers/pyroki.log 2>&1; sleep infinity"
+
+        for port in 8114 8115 8116 8122; do
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
+              echo "[servers] :$port ready (after ${i}0s)"
+              break
+            fi
+            sleep 10
+          done
+        done
+
+        RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
+        case "{{mode}}" in
+          single)   CONFIG_VARIANT=franka_robolab_skill_library ;;
+          ensemble) CONFIG_VARIANT=franka_robolab_skill_library_ensemble ;;
+          *)        echo "[run] FATAL: unknown mode={{mode}} (expected 'single' or 'ensemble')"; exit 1 ;;
+        esac
+        echo "[run] mode={{mode}} batch={{batch_name}} run_ts=$RUN_TS trials={{trials}} config=$CONFIG_VARIANT"
+
+        WRAPPER_TIMEOUT_S=$(( {{trials}} * 1100 + 1200 ))
+
+        # 4 batches × {9,8,8,7} tasks = 32 LH-xr tasks (full suite). Same
+        # names as /home/rescuedog/robolab/robolab/tasks/long_horizon/
+        # complex_references/*.py task classes. Batches map to sub-categories
+        # Spatial/Counting/Negation/Size+Sort.
+        # `smoke` = 1 short task for sanity-checking the pod end-to-end.
+        case "{{batch_name}}" in
+          smoke|xr-smoke-0)
+            SCENE_ARR=(XrBehindBowlTask) ;;
+          xr-batch-0)
+            # Spatial (9 tasks)
+            SCENE_ARR=(XrBehindBowlTask XrBetweenBinsTask XrGroupWithoutCanTask XrLeftOfBlockTask XrLeftRightMugTask XrLeftmostRightmostTask XrNearestContainerTask XrRowSplitTask XrSplitByBlockTask) ;;
+          xr-batch-1)
+            # Counting (8 tasks)
+            SCENE_ARR=(XrEveryOtherTask XrFirstLastTask XrFourFromRightTask XrOddEvenTask XrSecondFourthTask XrSecondFromLeftTask XrSecondFromLeftFiveTask XrThreeLeftmostTask) ;;
+          xr-batch-2)
+            # Negation (8 tasks)
+            SCENE_ARR=(XrBiggestSeparateTask XrEmptyContainerTask XrExceptBlocksTask XrExceptCansTask XrExceptOrangeTask XrExceptTallestTask XrNonFruitTask XrTwoExceptionsTask) ;;
+          xr-batch-3)
+            # Size + Sort (7 tasks)
+            SCENE_ARR=(XrBiggestFruitTask XrExtremesToBinTask XrSmallerThanTask XrSmallestItemTask XrSortBigSmallTask XrSortThreeBowlsTask XrTallestShortestCanTask) ;;
+          *)
+            echo "[run] FATAL: unknown batch_name '{{batch_name}}' — see osmo/run-capx-xr.yaml"
+            exit 1 ;;
+        esac
+        echo "[run] scenes: ${SCENE_ARR[*]}"
+        for scene in "${SCENE_ARR[@]}"; do
+          scene=$(echo "$scene" | xargs)
+          RUN_OUTPUT_DIR=$LUSTRE_DIR/capx-xr-results/$scene/$RUN_TS
+          mkdir -p "$RUN_OUTPUT_DIR"
+          echo
+          echo "============================================================"
+          echo "[run] scene=$scene  output_dir=$RUN_OUTPUT_DIR  wrap_timeout=${WRAPPER_TIMEOUT_S}s"
+          echo "============================================================"
+
+          cd "$CAPX_DIR"
+          PYTHON="$ISAAC_PY" \
+              ./scripts/run_capx_robolab_eval.sh \
+                  --clean \
+                  --config env_configs/robolab/${CONFIG_VARIANT}.yaml \
+                  --scene-name "$scene" \
+                  --trials {{trials}} \
+                  --timeout $WRAPPER_TIMEOUT_S \
+                  --output-dir "$RUN_OUTPUT_DIR" \
+                  || echo "[run] wrapper exited non-zero for $scene (eval may have partial results)"
+
+          echo "[done] $scene → $RUN_OUTPUT_DIR"
+          ls -la "$RUN_OUTPUT_DIR" || true
+
+          if [ -d /tmp/capx_servers ]; then
+            mkdir -p "$RUN_OUTPUT_DIR/_servers"
+            cp -v /tmp/capx_servers/*.log "$RUN_OUTPUT_DIR/_servers/" 2>/dev/null || true
+          fi
+        done
+
+        touch /done.txt
+        sleep 600
+  resources:
+    default:
+      gpu: 2
+      cpu: 12
+      memory: 80Gi
+      storage: 80Gi
+      platform: ovx-l40
+
+default-values:
+  mode: single
+  batch_name: smoke
+  trials: 1
+  user_name: siyic
