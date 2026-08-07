@@ -5,6 +5,16 @@ from capx.envs.base import list_envs, register_env
 from .franka_real import FrankaRealLowLevel
 register_env("franka_real_low_level", FrankaRealLowLevel)
 
+# Real Franka via a franky_service-style driver (WebSocket policy contract).
+# Separate from franka_real (which targets robots_realtime); needs only msgpack
+# + openpi_client, so it is imported defensively like the simulator backends.
+try:
+    from .franky_ws import FrankyWsLowLevel
+
+    register_env("franky_ws_low_level", FrankyWsLowLevel)
+except Exception:
+    print("franky_ws not available (needs openpi_client)!")
+
 # NOTE: Can only have one of Robosuite or LIBERO installed at a time!
 # Using Robosuite run: uv sync --extra robosuite
 try:

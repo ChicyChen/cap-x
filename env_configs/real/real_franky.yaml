@@ -1,0 +1,106 @@
+# CaP-X on a franky_service-style real Franka cell.
+#
+# Identical to real.yaml except the robot transport: this serves the
+# WebSocket + msgpack-numpy contract on :8041 instead of raw-TCP msgpack
+# on :9000 (robots_realtime).  See docs/franky-service-support.md.
+#
+# The task is whatever the operator sets here / whatever prompt the driver
+# sends -- nothing in the transport constrains the task set.
+#
+# Usage: uv run capx/envs/launch.py --config-path env_configs/real/real_franky.yaml
+
+env:
+  # Real-robot code env: takes its task from the driver's per-frame
+  # `prompt` instead of from this file. Sim configs are untouched.
+  _target_: capx.envs.tasks.franka.franka_real_wire_task.FrankaRealWireTaskCodeEnv
+  cfg:
+    _target_: capx.envs.tasks.base.CodeExecEnvConfig
+    low_level:
+      # Purpose-built for franky_service; does NOT reuse franka_real.py
+      # (that targets robots_realtime). See docs/franky-service-support.md.
+      _target_: capx.envs.simulators.franky_ws.FrankyWsLowLevel
+      host: 0.0.0.0
+      port: 8041
+    privileged: false
+    apis:
+      # Same tier as the SIM baseline (env_configs/robolab/
+      # franka_robolab_skill_library.yaml uses FrankaRobolabApiReducedSkillLibrary):
+      # SAM3 perception + ContactGraspNet grasp synthesis + the LLM-synthesized
+      # skill library. Registered in capx/integrations/__init__.py:132 with the
+      # REAL geometry -- tcp_offset=[0,0,-0.157] and real=True -- which must
+      # differ from sim because the physical gripper is 50 mm longer and needs
+      # the wrist-rotation correction.
+      #
+      # Remaining tier difference vs sim: sim also exposes cuRobo motion
+      # planning (plan_grasp_trajectory / execute_joint_trajectory); this real
+      # tier uses solve_ik + move_to_joints + traj_plan. cuRobo on hardware
+      # needs a validated robot/world model, and the comparison system likewise
+      # deploys its `linear` planner rather than cuRobo on this cell.
+      #
+      # Do NOT use FrankaRealControlApi here: it exposes only 5 tools
+      # (get_object_pose / sample_grasp_pose / goto_pose / open+close_gripper),
+      # a much weaker agent than the sim baseline, which would understate CaP-X.
+      - FrankaRealReducedSkillLibraryControlApi
+    task_only_prompt: "(task supplied by the robot driver)"
+    prompt: |
+      You are controlling a Franka Emika robot with API described below.
+      Goal: pick up the red cube and lift it.
+      You may write python code comments for reasoning but ONLY write the executable Python code and do not write it in code fences.
+      After this code executes, you will be able to get a new observation of the environment and write new code to complete the task if needed.
+      The functions (APIs) below are already imported to the environment. If you want to use numpy, you need to import it explicitly.
+    
+    multi_turn_prompt: |
+      The following code blocks were just executed:
+      ```python
+      {executed_code}
+      ```
+      The current console stdout is:
+      ```
+      {console_stdout}
+      ```
+      The current console stderr is:
+      ```
+      {console_stderr}
+      ```
+      If there were no errors during compilation or execution, the console stderr will be empty. If there were errors, consider regenerating the code.
+      Please respond with EXACTLY ONE of the following:
+      - The word 'REGENERATE' followed immediately by new Python code in a fenced code block (```python...```) if you want to modify the code.
+      - The word 'FINISH' if the task appears to be complete
+
+api_servers:
+  - _target_: capx.serving.launch_sam3_server.main
+    device: cuda
+    port: 8114
+    host: 127.0.0.1
+    
+  - _target_: capx.serving.launch_contact_graspnet_server.main
+    port: 8115
+    host: 127.0.0.1
+
+  - _target_: capx.serving.launch_pyroki_server.main
+    port: 8116
+    host: 127.0.0.1
+    robot: panda_description
+    target_link: panda_hand
+
+record_video: true
+
+# Mirror the robolab baseline's modalities so the real-robot numbers are
+# comparable with the sim ones (M2 text multi-turn + M3 visual differencing).
+use_visual_feedback: false
+use_img_differencing: true
+use_video_differencing: false
+use_wrist_camera: false
+use_parallel_ensemble: false
+use_multimodel: false
+
+visual_differencing_model: aws/anthropic/bedrock-claude-opus-4-7
+visual_differencing_model_server_url: https://inference-api.nvidia.com/v1/chat/completions
+output_dir: ./outputs/franka_real_franky
+debug: true
+
+web_ui: true          # set to false to prevent launching the interactive web UI and instead use headless CLI
+# web_ui_port: 8200    # optional: override the default web UI port
+
+trials: 1
+num_workers: 1
