@@ -254,3 +254,104 @@ class TestAnnotatedResultsReachTheDashboard:
 
         src = inspect.getsource(h.install_tool_hook)
         assert "original_update(self" in src
+
+
+class TestNeverWrapBoundExposedMethods:
+    """Regression: wrapping a method that ``functions()`` exposes shifts args.
+
+    ``ApiBase.functions()`` captures BOUND methods at env-construction time and
+    hands them to the generated code. If instrumentation wraps such a method
+    first, the captured object is our wrapper already bound to ``self``; calling
+    it passes ``self`` again as the first positional arg and everything shifts:
+
+        TypeError: select_top_down_grasp() missing 2 required positional
+        arguments: 'scores' and 'cam_to_world'
+
+    Seen live on siyi-hugo. Only wrap methods reached through the api object.
+    """
+
+    @staticmethod
+    def _exposed_function_names() -> set[str]:
+        import pathlib
+        import re
+
+        src = pathlib.Path(
+            "capx/integrations/franka/control_reduced_skill_library.py"
+        ).read_text()
+        return set(re.findall(r'fns\["([a-z_0-9]+)"\]', src))
+
+    @staticmethod
+    def _wrapped_names() -> set[str]:
+        import pathlib
+        import re
+
+        src = pathlib.Path("capx/monitor/instrument.py").read_text()
+        names: set[str] = set()
+        for block in re.findall(r'for name in \(([^)]*)\)', src):
+            names |= set(re.findall(r'"([a-z_0-9]+)"', block))
+        return names
+
+    def test_no_wrapped_method_is_exposed_to_generated_code(self):
+        overlap = self._wrapped_names() & self._exposed_function_names()
+        assert not overlap, (
+            f"these are handed to generated code as bound methods and must not "
+            f"be wrapped: {sorted(overlap)}"
+        )
+
+    def test_select_top_down_grasp_keeps_its_real_signature(self):
+        import inspect
+
+        from capx.integrations.franka.control_reduced_skill_library import (
+            FrankaControlApiReducedSkillLibrary as Api,
+        )
+        from capx.monitor import instrument
+
+        instrument._installed = False
+        instrument.instrument_tools()
+        params = list(inspect.signature(Api.select_top_down_grasp).parameters)
+        assert params[:4] == ["self", "grasps", "scores", "cam_to_world"], params
+
+    def test_instrument_tools_is_unwind_safe(self):
+        """Re-installing must not chain wrappers (each chain shifts args)."""
+        import inspect
+
+        from capx.integrations.franka.control_reduced_skill_library import (
+            FrankaControlApiReducedSkillLibrary as Api,
+        )
+        from capx.monitor import instrument
+
+        import numpy as np
+
+        instrument._installed = False
+        instrument.instrument_tools()
+        instrument._installed = False
+        instrument.instrument_tools()
+
+        # A fresh wrapper object per install is fine; CHAINING is not, because
+        # each layer re-passes self and shifts the args. Assert the depth by
+        # counting how many times a call is intercepted.
+        calls = {"n": 0}
+        real = Api.__dict__.get("__monitor_orig_plan_grasp")
+        assert real is not None, "originals must be stashed for unwinding"
+
+        class Probe:
+            _env = None
+
+        def counting(self, *a, **kw):
+            calls["n"] += 1
+            raise RuntimeError("stop here")
+
+        setattr(Api, "__monitor_orig_plan_grasp", counting)
+        instrument._installed = False
+        instrument.instrument_tools()
+        try:
+            Api.plan_grasp(Probe(), np.zeros((4, 4)), np.eye(3), np.zeros((4, 4)))
+        except Exception:
+            pass
+        finally:
+            setattr(Api, "__monitor_orig_plan_grasp", real)
+            instrument._installed = False
+            instrument.instrument_tools()
+        assert calls["n"] == 1, (
+            f"the real method was reached {calls['n']} times — wrappers chained"
+        )

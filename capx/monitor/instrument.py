@@ -42,6 +42,16 @@ def instrument_tools() -> None:
         print(f"[monitor] tool instrumentation unavailable: {exc}", flush=True)
         return
 
+    # Unwind a previous install first. Chained wrappers are not merely
+    # wasteful: each layer re-passes self, so args shift and calls break.
+    for _name in ("detect_object_owlvit", "detect_objects", "detect_gdino", "plan_grasp"):
+        _saved = getattr(Api, f"__monitor_orig_{_name}", None)
+        if _saved is not None:
+            setattr(Api, _name, _saved)
+    for _name in ("detect_object_owlvit", "detect_objects", "detect_gdino", "plan_grasp"):
+        if getattr(Api, _name, None) is not None:
+            setattr(Api, f"__monitor_orig_{_name}", getattr(Api, _name))
+
     wrapped = _wrap_detection(Api) + _wrap_grasp(Api)
     if not wrapped:
         print(
@@ -96,7 +106,16 @@ def _wrap_detection(Api) -> list[str]:
 def _wrap_grasp(Api) -> list[str]:
     """Draw Contact GraspNet candidates and the chosen grasp."""
     done = []
-    for name in ("plan_grasp", "select_top_down_grasp"):
+    # NOTE: do NOT wrap select_top_down_grasp. ApiBase.functions() captures
+    # BOUND methods at env-construction time and hands them to the generated
+    # code, so a wrapper installed first gets called with self already bound --
+    # every positional arg then shifts by one:
+    #   TypeError: select_top_down_grasp() missing 2 required positional
+    #   arguments: 'scores' and 'cam_to_world'
+    # plan_grasp is safe because it is reached via the api object, and it is the
+    # one that actually has grasps to draw. select_top_down_grasp is pure
+    # selection with no image, so nothing is lost by leaving it alone.
+    for name in ("plan_grasp",):
         fn = getattr(Api, name, None)
         if fn is None:
             continue
