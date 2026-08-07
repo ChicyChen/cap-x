@@ -115,33 +115,32 @@ class TestNeverRaises:
         assert call() is None
 
 
-class TestInstrumentationTargetsTheRealApi:
-    """A wrong class name makes every wrapper silently no-op — which is exactly
-    what happened on the first attempt (control_reduced vs
-    control_reduced_skill_library)."""
+class TestInstrumentationDoesNotWrap:
+    """The previous version of this class asserted that plan_grasp and
+    detect_object_owlvit GET wrapped. That was the bug: functions() hands them to
+    generated code as bound methods, so wrapping shifts every argument. The
+    requirement is now the opposite."""
 
-    def test_the_real_methods_get_wrapped(self):
-        from capx.integrations.franka.control_reduced_skill_library import (
-            FrankaControlApiReducedSkillLibrary as Api,
+    def test_methods_are_not_wrapped(self):
+        from capx.integrations.franka.control_reduced import (
+            FrankaControlApiReduced as Api,
         )
         from capx.monitor import instrument
 
-        instrument._installed = False
         instrument.instrument_tools()
-        assert Api.plan_grasp.__name__ == "wrapped"
-        assert Api.detect_object_owlvit.__name__ == "wrapped"
+        assert Api.plan_grasp.__name__ == "plan_grasp"
+        assert Api.detect_object_owlvit.__name__ == "detect_object_owlvit"
 
-    def test_install_is_idempotent(self):
-        from capx.integrations.franka.control_reduced_skill_library import (
-            FrankaControlApiReducedSkillLibrary as Api,
+    def test_instrument_tools_is_safe_to_call_repeatedly(self):
+        from capx.integrations.franka.control_reduced import (
+            FrankaControlApiReduced as Api,
         )
         from capx.monitor import instrument
 
-        instrument._installed = False
-        instrument.instrument_tools()
-        first = Api.plan_grasp
-        instrument.instrument_tools()
-        assert Api.plan_grasp is first, "must not double-wrap"
+        before = Api.plan_grasp
+        for _ in range(3):
+            instrument.instrument_tools()
+        assert Api.plan_grasp is before
 
 
 class TestZeroResultsAreLoud:
@@ -256,49 +255,73 @@ class TestAnnotatedResultsReachTheDashboard:
         assert "original_update(self" in src
 
 
-class TestNeverWrapBoundExposedMethods:
-    """Regression: wrapping a method that ``functions()`` exposes shifts args.
+class TestNoToolMethodIsEverPatched:
+    """Regression, hit TWICE on the real robot.
 
-    ``ApiBase.functions()`` captures BOUND methods at env-construction time and
-    hands them to the generated code. If instrumentation wraps such a method
-    first, the captured object is our wrapper already bound to ``self``; calling
-    it passes ``self`` again as the first positional arg and everything shifts:
+    ``ApiBase.functions()`` hands BOUND methods to the generated code, so a
+    wrapper installed on one of them re-passes ``self`` and shifts every
+    positional argument:
 
         TypeError: select_top_down_grasp() missing 2 required positional
-        arguments: 'scores' and 'cam_to_world'
+                   arguments: 'scores' and 'cam_to_world'
+        TypeError: plan_grasp() missing 2 required positional
+                   arguments: 'intrinsics' and 'segmentation'
 
-    Seen live on siyi-hugo. Only wrap methods reached through the api object.
+    The second failure happened because the first fix scanned only
+    control_reduced_skill_library.py -- but the exposing ``functions()`` lives in
+    the PARENT (``FrankaControlApiReduced``). Scan every integration file.
     """
 
     @staticmethod
-    def _exposed_function_names() -> set[str]:
-        import pathlib
+    def _all_exposed_names() -> set[str]:
+        import pathlib as _p
         import re
 
-        src = pathlib.Path(
-            "capx/integrations/franka/control_reduced_skill_library.py"
-        ).read_text()
-        return set(re.findall(r'fns\["([a-z_0-9]+)"\]', src))
-
-    @staticmethod
-    def _wrapped_names() -> set[str]:
-        import pathlib
-        import re
-
-        src = pathlib.Path("capx/monitor/instrument.py").read_text()
         names: set[str] = set()
-        for block in re.findall(r'for name in \(([^)]*)\)', src):
-            names |= set(re.findall(r'"([a-z_0-9]+)"', block))
+        for f in _p.Path("capx/integrations").rglob("*.py"):
+            names |= set(re.findall(r'fns\["([a-z_0-9]+)"\]', f.read_text()))
         return names
 
-    def test_no_wrapped_method_is_exposed_to_generated_code(self):
-        overlap = self._wrapped_names() & self._exposed_function_names()
-        assert not overlap, (
-            f"these are handed to generated code as bound methods and must not "
-            f"be wrapped: {sorted(overlap)}"
+    def test_instrumentation_patches_no_api_method(self):
+        """The only safe seam is _log_step / _log_step_update (internal)."""
+        import pathlib as _p
+        import re
+
+        src = _p.Path("capx/monitor/instrument.py").read_text()
+        assert "setattr(Api" not in src, (
+            "instrument.py must not patch api methods; annotate via the "
+            "_log_step hook instead"
         )
 
-    def test_select_top_down_grasp_keeps_its_real_signature(self):
+    def test_tool_signatures_are_untouched_after_instrumenting(self):
+        import inspect
+
+        from capx.integrations.franka.control_reduced import (
+            FrankaControlApiReduced as Reduced,
+        )
+        from capx.integrations.franka.control_reduced_skill_library import (
+            FrankaControlApiReducedSkillLibrary as Skill,
+        )
+        from capx.monitor import instrument
+
+        instrument.instrument_tools()
+        assert list(inspect.signature(Reduced.plan_grasp).parameters)[:4] == [
+            "self",
+            "depth",
+            "intrinsics",
+            "segmentation",
+        ]
+        assert list(inspect.signature(Reduced.detect_object_owlvit).parameters)[:3] == [
+            "self",
+            "rgb",
+            "text",
+        ]
+        assert list(
+            inspect.signature(Skill.select_top_down_grasp).parameters
+        )[:4] == ["self", "grasps", "scores", "cam_to_world"]
+
+    def test_every_exposed_method_keeps_a_plain_signature(self):
+        """Catch a future wrapper on ANY method generated code can call."""
         import inspect
 
         from capx.integrations.franka.control_reduced_skill_library import (
@@ -306,52 +329,13 @@ class TestNeverWrapBoundExposedMethods:
         )
         from capx.monitor import instrument
 
-        instrument._installed = False
         instrument.instrument_tools()
-        params = list(inspect.signature(Api.select_top_down_grasp).parameters)
-        assert params[:4] == ["self", "grasps", "scores", "cam_to_world"], params
-
-    def test_instrument_tools_is_unwind_safe(self):
-        """Re-installing must not chain wrappers (each chain shifts args)."""
-        import inspect
-
-        from capx.integrations.franka.control_reduced_skill_library import (
-            FrankaControlApiReducedSkillLibrary as Api,
-        )
-        from capx.monitor import instrument
-
-        import numpy as np
-
-        instrument._installed = False
-        instrument.instrument_tools()
-        instrument._installed = False
-        instrument.instrument_tools()
-
-        # A fresh wrapper object per install is fine; CHAINING is not, because
-        # each layer re-passes self and shifts the args. Assert the depth by
-        # counting how many times a call is intercepted.
-        calls = {"n": 0}
-        real = Api.__dict__.get("__monitor_orig_plan_grasp")
-        assert real is not None, "originals must be stashed for unwinding"
-
-        class Probe:
-            _env = None
-
-        def counting(self, *a, **kw):
-            calls["n"] += 1
-            raise RuntimeError("stop here")
-
-        setattr(Api, "__monitor_orig_plan_grasp", counting)
-        instrument._installed = False
-        instrument.instrument_tools()
-        try:
-            Api.plan_grasp(Probe(), np.zeros((4, 4)), np.eye(3), np.zeros((4, 4)))
-        except Exception:
-            pass
-        finally:
-            setattr(Api, "__monitor_orig_plan_grasp", real)
-            instrument._installed = False
-            instrument.instrument_tools()
-        assert calls["n"] == 1, (
-            f"the real method was reached {calls['n']} times — wrappers chained"
-        )
+        for name in sorted(self._all_exposed_names()):
+            fn = getattr(Api, name, None)
+            if fn is None:
+                continue
+            params = list(inspect.signature(fn).parameters)
+            assert params[:2] != ["self", "a"], (
+                f"{name} looks wrapped (*a/**kw) — generated code calls it as a "
+                f"bound method and every arg would shift"
+            )

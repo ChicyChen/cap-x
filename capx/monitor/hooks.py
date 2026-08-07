@@ -56,6 +56,12 @@ def install_tool_hook() -> None:
     def _log_step(self, tool_name, text="", images=None, highlight=False):  # type: ignore[no-untyped-def]
         last_tool["name"] = tool_name
         try:
+            from capx.monitor import instrument
+
+            instrument.note_api(self)
+        except Exception:
+            pass
+        try:
             original(self, tool_name, text, images=images, highlight=highlight)
         except Exception:
             pass
@@ -69,6 +75,20 @@ def install_tool_hook() -> None:
                 data={"tool": tool_name, "annotated": False},
                 images=_encode_images(images),
             )
+            # Some tools (Contact GraspNet, OWL-ViT) never draw their own
+            # result. Render those here rather than by patching the tool
+            # methods -- functions() hands those out as BOUND methods, so
+            # wrapping them shifts every argument and breaks generated code.
+            from capx.monitor import instrument
+
+            extra, caption = instrument.annotate_step(tool_name, images)
+            if extra or caption:
+                publish(
+                    EventKind.TOOL if extra else EventKind.ERROR,
+                    (caption or "") + ("  [annotated]" if extra else ""),
+                    data={"tool": tool_name, "annotated": bool(extra)},
+                    images=[extra] if extra else [],
+                )
         except Exception:
             pass
 

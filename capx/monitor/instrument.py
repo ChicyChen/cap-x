@@ -1,204 +1,157 @@
-"""Render annotated tool outputs into the CaP-X dashboard by runtime patching.
+"""Annotated tool views for the CaP-X dashboard.
 
-``capx/integrations/franka/control_reduced.py`` is shared with the sim/robolab
-path, so it is not edited. Instead the real-robot service calls
-``instrument_tools()`` at startup, which wraps the two tools whose visual output
-is missing:
+WHY THIS FILE NO LONGER PATCHES TOOL METHODS
+--------------------------------------------
+The obvious approach -- wrap ``plan_grasp`` / ``detect_object_owlvit`` to render
+their outputs -- is **unsafe here and was reverted twice on the real robot**.
 
-``detect_objects``  (GDino / OWL-ViT) logs the RAW rgb; the predicted boxes are
-                    never drawn, so a box on the wrong object is invisible.
-``plan_grasp``      (Contact GraspNet) logs no image at all, so there is no way
-                    to see where the candidates landed or which was chosen.
+``ApiBase.functions()`` captures **bound methods** at env-construction time and
+hands them to the generated code::
 
-Everything is best-effort: a rendering failure must never affect the robot.
+    fns["plan_grasp"] = self.plan_grasp            # control_reduced.py:104
+    fns["detect_object_owlvit"] = self.detect_object_owlvit
+    fns["select_top_down_grasp"] = self.select_top_down_grasp
+
+If instrumentation wraps such a method, the captured object is the wrapper
+*already bound to self*. Calling it re-passes ``self`` as the first positional
+argument and every argument shifts by one::
+
+    TypeError: select_top_down_grasp() missing 2 required positional
+               arguments: 'scores' and 'cam_to_world'
+    TypeError: plan_grasp() missing 2 required positional
+               arguments: 'intrinsics' and 'segmentation'
+
+Both were live failures. Note also that the exposing ``functions()`` lives in the
+PARENT class (``FrankaControlApiReduced``), so checking only the skill-library
+subclass is not enough -- that mistake caused the second failure.
+
+WHAT WE DO INSTEAD
+------------------
+``capx.monitor.hooks.install_tool_hook`` already wraps ``ApiBase._log_step`` and
+``ApiBase._log_step_update``, which are internal (never handed to generated code)
+and which every tool already calls. ``annotate_step`` below is invoked from that
+hook: given a tool name plus the images CaP-X was already logging, it adds the
+annotations CaP-X does not draw itself -- detection boxes and grasp candidates --
+using state read from the env.
+
+Nothing here changes any shared CaP-X file, and nothing patches a method that the
+generated code can reach.
 """
 
 from __future__ import annotations
 
 import logging
-import time
+from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_installed = False
+#: Set by hooks when an api instance logs a step, so renderers can read env state
+#: (grasp poses/scores, intrinsics) without patching any tool method.
+_LAST_API: dict[str, Any] = {}
 
 
 def instrument_tools() -> None:
-    """Wrap detection + grasp planning so they publish annotated images."""
-    global _installed
-    if _installed:
-        return
-    # The real-robot config uses FrankaRealReducedSkillLibrary, which is
-    # FrankaControlApiReducedSkillLibrary(real=True) — the class lives in
-    # control_reduced_skill_library, NOT control_reduced. Getting this wrong
-    # makes every wrapper silently no-op.
+    """Kept for call-site compatibility; deliberately a no-op.
+
+    See the module docstring: patching tool methods breaks the generated code
+    because ``functions()`` hands out bound methods. Annotation happens in
+    ``annotate_step``, driven by the safe ``_log_step`` hook.
+    """
+    print(
+        "[monitor] annotated views via the _log_step hook "
+        "(tool methods are NOT patched -- functions() hands them to generated "
+        "code as bound methods)",
+        flush=True,
+    )
+
+
+def note_api(api: Any) -> None:
+    """Remember the api instance that is currently logging."""
+    _LAST_API["api"] = api
+
+
+def annotate_step(tool_name: str, images: Any) -> tuple[str | None, str | None]:
+    """Return ``(annotated_b64, caption)`` for tools CaP-X does not draw itself.
+
+    ``images`` is whatever the tool passed to ``_log_step``. Returns
+    ``(None, None)`` when there is nothing to add, so the caller falls back to the
+    image CaP-X supplied.
+    """
     try:
-        from capx.integrations.franka.control_reduced_skill_library import (
-            FrankaControlApiReducedSkillLibrary as Api,
-        )
-    except Exception as exc:  # pragma: no cover
-        print(f"[monitor] tool instrumentation unavailable: {exc}", flush=True)
-        return
+        from capx.monitor import viz
 
-    # Unwind a previous install first. Chained wrappers are not merely
-    # wasteful: each layer re-passes self, so args shift and calls break.
-    for _name in ("detect_object_owlvit", "detect_objects", "detect_gdino", "plan_grasp"):
-        _saved = getattr(Api, f"__monitor_orig_{_name}", None)
-        if _saved is not None:
-            setattr(Api, _name, _saved)
-    for _name in ("detect_object_owlvit", "detect_objects", "detect_gdino", "plan_grasp"):
-        if getattr(Api, _name, None) is not None:
-            setattr(Api, f"__monitor_orig_{_name}", getattr(Api, _name))
+        api = _LAST_API.get("api")
+        if api is None:
+            return None, None
 
-    wrapped = _wrap_detection(Api) + _wrap_grasp(Api)
-    if not wrapped:
-        print(
-            "[monitor] WARNING: no tool methods were wrapped — the API surface "
-            "changed; dashboard tool images will be missing",
-            flush=True,
-        )
-    else:
-        print(f"[monitor] annotated tool views: {', '.join(wrapped)}", flush=True)
-    _installed = True
+        if "GraspNet" in tool_name or "grasp" in tool_name.lower():
+            return _annotate_grasps(api, images, viz)
+        if "OWL-ViT" in tool_name or "Detection" in tool_name:
+            return _annotate_detections(api, images, viz)
+    except Exception:
+        logger.debug("annotate_step failed", exc_info=True)
+    return None, None
 
 
-def _wrap_detection(Api) -> list[str]:
-    """Draw GDino / OWL-ViT boxes."""
-    done = []
-    for name in ("detect_object_owlvit", "detect_objects", "detect_gdino"):
-        fn = getattr(Api, name, None)
-        if fn is None:
-            continue
-        orig = fn
-
-        def wrapped(self, *a, _orig=orig, **kw):
-            out = _orig(self, *a, **kw)
-            try:
-                rgb = _first_image(a, kw)
-                if rgb is not None and isinstance(out, (list, tuple)):
-                    from capx.monitor import hooks as mon
-                    from capx.monitor import viz
-
-                    img = viz.detection_boxes(rgb, out)
-                    if img:
-                        mon.tool_image(
-                            "Detection boxes",
-                            f"{len(out)} detection(s)"
-                            + (
-                                f", best score {max(d.get('score', 0) for d in out):.3f}"
-                                if out
-                                else " — NOTHING DETECTED"
-                            ),
-                            img,
-                            is_error=not out,
-                        )
-            except Exception:
-                pass
-            return out
-
-        setattr(Api, name, wrapped)
-        done.append(name)
-    return done
-
-
-def _wrap_grasp(Api) -> list[str]:
-    """Draw Contact GraspNet candidates and the chosen grasp."""
-    done = []
-    # NOTE: do NOT wrap select_top_down_grasp. ApiBase.functions() captures
-    # BOUND methods at env-construction time and hands them to the generated
-    # code, so a wrapper installed first gets called with self already bound --
-    # every positional arg then shifts by one:
-    #   TypeError: select_top_down_grasp() missing 2 required positional
-    #   arguments: 'scores' and 'cam_to_world'
-    # plan_grasp is safe because it is reached via the api object, and it is the
-    # one that actually has grasps to draw. select_top_down_grasp is pure
-    # selection with no image, so nothing is lost by leaving it alone.
-    for name in ("plan_grasp",):
-        fn = getattr(Api, name, None)
-        if fn is None:
-            continue
-        orig = fn
-
-        def wrapped(self, *a, _orig=orig, **kw):
-            t0 = time.perf_counter()
-            out = _orig(self, *a, **kw)
-            try:
-                _report_grasps(self, a, kw, time.perf_counter() - t0)
-            except Exception:
-                pass
-            return out
-
-        setattr(Api, name, wrapped)
-        done.append(name)
-    return done
-
-
-def _report_grasps(api, args, kwargs, seconds: float) -> None:
-    """Publish grasp candidates + the chosen one, drawn on the RGB."""
-    from capx.monitor import hooks as mon
-    from capx.monitor import viz
-
+def _annotate_grasps(api, images, viz):
+    """Draw Contact GraspNet candidates + the chosen one on the current RGB."""
     env = getattr(api, "_env", None)
     poses = getattr(env, "grasp_sample", None) if env is not None else None
-    scores = getattr(env, "grasp_scores", None) if env is not None else None
-
-    if poses is None or not len(np.atleast_3d(np.asarray(poses))):
-        mon.tool_image(
-            "Contact GraspNet",
-            "NO GRASP CANDIDATES returned — the masked point cloud was probably "
-            "empty or too small. Check the segmentation mask.",
-            None,
-            is_error=True,
-        )
-        return
-
+    if poses is None:
+        return None, None
     P = np.asarray(poses, dtype=np.float64)
     if P.ndim == 2:
         P = P[None]
+    if P.ndim != 3 or len(P) == 0:
+        return None, "NO GRASP CANDIDATES returned — the masked point cloud was "\
+                     "probably empty. Check the segmentation mask."
+    scores = getattr(env, "grasp_scores", None)
     sc = np.asarray(scores).reshape(-1) if scores is not None else None
     chosen = int(np.argmax(sc)) if sc is not None and len(sc) == len(P) else None
 
-    rgb, K = _rgb_and_intrinsics(api, args, kwargs)
-    img = (
-        viz.grasp_candidates(rgb, P, K, sc, chosen)
-        if rgb is not None and K is not None
-        else None
-    )
+    rgb, K = _rgb_and_K(api, images)
+    if rgb is None or K is None:
+        return None, None
+    img = viz.grasp_candidates(rgb, P, K, sc, chosen)
     best = f", best score {float(sc[chosen]):.3f}" if chosen is not None else ""
-    mon.tool_image(
-        "Contact GraspNet",
-        f"{len(P)} grasp candidate(s) in {seconds:.2f}s{best}",
-        img,
-    )
+    return img, f"{len(P)} grasp candidate(s){best}"
 
 
-def _first_image(args, kwargs):
-    for v in list(args) + list(kwargs.values()):
-        a = np.asarray(v) if not isinstance(v, (str, bytes)) else None
-        if a is not None and a.ndim == 3 and a.shape[-1] == 3:
-            return a
-    return None
+def _annotate_detections(api, images, viz):
+    """Draw the most recent detection boxes, if the env kept them."""
+    env = getattr(api, "_env", None)
+    dets = None
+    for attr in ("last_detections", "detections", "owlvit_results"):
+        dets = getattr(env, attr, None) if env is not None else None
+        if dets:
+            break
+    if not dets:
+        return None, None
+    rgb, _ = _rgb_and_K(api, images)
+    if rgb is None:
+        return None, None
+    return viz.detection_boxes(rgb, dets), f"{len(dets)} detection(s)"
 
 
-def _rgb_and_intrinsics(api, args, kwargs):
-    """Best-effort: the live observation carries both."""
-    rgb = _first_image(args, kwargs)
-    K = None
-    for v in list(args) + list(kwargs.values()):
+def _rgb_and_K(api, images):
+    """Best-effort RGB + intrinsics: prefer the logged image, else the live obs."""
+    rgb = None
+    for cand in (images if isinstance(images, (list, tuple)) else [images]):
         try:
-            a = np.asarray(v)
-            if a.shape == (3, 3):
-                K = a
+            a = np.asarray(cand)
+            if a.ndim == 3 and a.shape[-1] == 3:
+                rgb = a
+                break
         except Exception:
             continue
-    if rgb is None or K is None:
-        try:
-            obs = api._env.get_observation()
-            cam = obs["robot0_robotview"]
-            rgb = rgb if rgb is not None else cam["images"]["rgb"]
-            K = K if K is not None else np.asarray(cam["intrinsics"])
-        except Exception:
-            pass
+    K = None
+    try:
+        obs = api._env.get_observation()
+        cam = obs["robot0_robotview"]
+        rgb = rgb if rgb is not None else cam["images"]["rgb"]
+        K = np.asarray(cam["intrinsics"])
+    except Exception:
+        pass
     return rgb, K
