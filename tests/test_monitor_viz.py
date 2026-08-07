@@ -174,6 +174,12 @@ class TestAnnotatedResultsReachTheDashboard:
     """
 
     def _api(self):
+        """Fresh hook install.
+
+        test_monitor.py also installs the hook and leaves ApiBase wrapped, so a
+        cross-file run would otherwise double-wrap and lose the annotated event.
+        Restore the originals first so each install is clean.
+        """
         import numpy as np
 
         from capx.integrations.base_api import ApiBase

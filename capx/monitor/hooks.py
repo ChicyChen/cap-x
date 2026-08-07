@@ -41,6 +41,15 @@ def install_tool_hook() -> None:
         print(f"[monitor] tool hook unavailable: {exc}", flush=True)
         return
 
+    # Unwind any previous install so re-installing cannot stack wrappers (which
+    # would publish the same event several times).
+    for _name in ("_log_step", "_log_step_update"):
+        _saved = getattr(ApiBase, f"__monitor_orig{_name}", None)
+        if _saved is not None:
+            setattr(ApiBase, _name, _saved)
+    ApiBase.__monitor_orig_log_step = ApiBase._log_step
+    ApiBase.__monitor_orig_log_step_update = ApiBase._log_step_update
+
     original = ApiBase._log_step
     last_tool = {"name": "tool result"}
 
