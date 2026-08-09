@@ -475,9 +475,20 @@ class FrankyWsLowLevel(BaseEnv):
             # plan at the next robot interaction.
             self._ep.generation += 1
             gen = self._ep.generation
+            # Drop the queued trajectory too. Bumping the generation only stops
+            # the plan at its NEXT robot interaction; anything already enqueued
+            # keeps being served to the driver until the next episode_id arrives
+            # and the boundary path clears it. Observed live: episode 1 ended on
+            # idle, then "episode 1 -> 2: dropping 488 queued waypoint(s)" --
+            # i.e. the arm executed 488 rows of a finished episode. Episode 0
+            # looked fine only because its plan had barely enqueued anything.
+            dropped = max(0, len(self._ep.traj) - self._ep.cursor)
+            self._ep.traj, self._ep.cursor = [], 0
+            self._ep.last_cmd = None
         print(
             f"[franky-ws] episode {ep} ended ({reason}); invalidating the "
-            f"running plan (generation -> {gen})",
+            f"running plan (generation -> {gen}); dropped {dropped} queued "
+            "waypoint(s)",
             flush=True,
         )
         try:

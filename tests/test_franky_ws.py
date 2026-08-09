@@ -870,3 +870,78 @@ class TestEndedEpisodeRefusesNewWork:
             raise AssertionError("should have raised")
         except fw.EpisodeSuperseded as exc:
             assert "terminated episode" in str(exc)
+
+
+class TestIdleEndAlsoDropsTheQueue:
+    """Operator report: the FIRST episode end discarded stale steps, the SECOND
+    did not.
+
+    Live log:
+        episode 0 ended (no frames for 12s) ... generation -> 1
+        episode 0 -> 1: dropping 0 queued waypoint(s)
+        episode 1 ended (no frames for 12s) ... generation -> 3
+        episode 1 -> 2: dropping 488 queued waypoint(s)     <-- 488 STALE
+
+    Bumping the generation stops the plan only at its NEXT robot interaction.
+    Anything ALREADY enqueued kept being served until the next episode_id
+    arrived, so the arm executed 488 rows of a finished episode. Episode 0 only
+    looked correct because its plan had barely enqueued anything.
+    """
+
+    def _env(self, queued=0):
+        import capx.envs.simulators.franky_ws as fw
+
+        env = fw.FrankyWsLowLevel.__new__(fw.FrankyWsLowLevel)
+        env._ep = fw._Endpoint(host="127.0.0.1", port=0, action_horizon=8)
+        env._ep.wire = {"observation/joint_position": np.zeros(7)}
+        env._ep.episode_seen = 1
+        env._ep.joints = np.zeros(7)
+        env.max_joint_step_rad = 0.05
+        env.action_horizon = 8
+        if queued:
+            env._ep.traj = [np.zeros(8) for _ in range(queued)]
+            env._ep.last_cmd = np.ones(8)
+        return env, fw
+
+    def test_queued_waypoints_are_dropped_on_idle_end(self):
+        env, _ = self._env(queued=488)
+        assert env._pending() == 488
+        env._announce_episode_end("no frames for 12s")
+        assert env._pending() == 0, (
+            "a finished episode's waypoints must not keep reaching the arm"
+        )
+
+    def test_hold_pose_is_cleared_so_it_re_anchors(self):
+        """A stale last_cmd would hold the FINISHED episode's pose."""
+        env, _ = self._env(queued=10)
+        env._announce_episode_end("driver disconnected")
+        assert env._ep.last_cmd is None
+
+    def test_second_episode_end_behaves_like_the_first(self):
+        """The reported asymmetry: both ends must drop their queue."""
+        env, _ = self._env(queued=0)
+        env._announce_episode_end("no frames for 12s")      # episode 1
+        first_pending = env._pending()
+
+        env._ep.ended_announced = False                     # episode 2 starts
+        env._ep.episode_seen = 2
+        env._ep.traj = [np.zeros(8) for _ in range(488)]
+        env._announce_episode_end("no frames for 12s")      # episode 2 ends
+        assert env._pending() == first_pending == 0
+
+    def test_still_idempotent(self):
+        env, _ = self._env(queued=5)
+        env._announce_episode_end("first")
+        gen = env._ep.generation
+        env._ep.traj = [np.zeros(8) for _ in range(3)]      # late arrival
+        env._announce_episode_end("second")
+        assert env._ep.generation == gen, "must not bump twice"
+
+    def test_driver_serving_after_idle_end_gets_the_hold_pose_not_stale_rows(self):
+        """End-to-end: the next chunk must be a hold, not queued motion."""
+        env, _ = self._env(queued=40)
+        env._ep.traj = [np.full(8, 0.5) for _ in range(40)]
+        env._announce_episode_end("no frames for 12s")
+        actions = env._on_frame({"observation/joint_position": np.zeros(7)})
+        assert not np.allclose(actions[:, :7], 0.5), "served stale waypoints"
+        assert np.allclose(actions[:, :7], 0.0), "should hold the measured pose"
