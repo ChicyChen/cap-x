@@ -195,6 +195,28 @@ def _completions_to_responses_convert_prompt(prompt: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _publish_llm_retry(retry, max_retries, status, model, gave_up=False) -> None:
+    """Surface provider outages on the dashboard. Never raises."""
+    try:
+        from capx.monitor import hooks as mon
+
+        if gave_up:
+            mon.error(
+                f"LLM provider unavailable: HTTP {status} from {model} after "
+                f"{max_retries} retries — the episode cannot proceed",
+                status=status,
+                model=model,
+            )
+        else:
+            mon.note(
+                f"LLM retry {retry}/{max_retries}: HTTP {status} from {model}",
+                status=status,
+                model=model,
+            )
+    except Exception:
+        pass
+
+
 def query_model(args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]) -> str:
     """Query vLLM server for code generation.
 
@@ -265,15 +287,37 @@ def query_model(args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]) -> str:
     response = requests.post(
         server_url, headers=headers, data=json.dumps(payload), timeout=200
     )
+    # Bounded, short backoff. The original loop retried FOREVER with
+    # 150-330s blind sleeps, which on a real-robot session is
+    # indistinguishable from a hang: an upstream Bedrock 503 stalled every
+    # episode for minutes while the operator saw silence. Env-tunable so a
+    # long unattended sweep can still be patient.
+    max_retries = int(os.environ.get("CAPX_LLM_MAX_RETRIES", 6))
+    base_sleep = float(os.environ.get("CAPX_LLM_RETRY_SLEEP_S", 20))
     retry = 1
-    while response.status_code in [404, 500, 502, 503, 504]:
-        sleep_time = 240 + random.uniform(-90, 90)
-        print(f"Retry {retry}. Model query failed with status code {response.status_code}. Error: {response.text}. Retrying in {sleep_time} seconds...")
+    while response.status_code in [404, 500, 502, 503, 504] and retry <= max_retries:
+        sleep_time = min(base_sleep * retry, 60.0) + random.uniform(0, 5)
+        print(
+            f"Retry {retry}/{max_retries}. Model query failed with status code "
+            f"{response.status_code} (model={getattr(args, 'model', '?')}). "
+            f"Error: {response.text[:300]}. Retrying in {sleep_time:.0f}s...",
+            flush=True,
+        )
+        _publish_llm_retry(retry, max_retries, response.status_code, getattr(args, "model", "?"))
         time.sleep(sleep_time)
         response = requests.post(
             server_url, headers=headers, data=json.dumps(payload), timeout=200
         )
         retry += 1
+    if response.status_code in [404, 500, 502, 503, 504]:
+        # Fail loudly rather than silently returning junk: the caller (and the
+        # dashboard) must see that the provider is down.
+        _publish_llm_retry(retry, max_retries, response.status_code, getattr(args, "model", "?"), gave_up=True)
+        raise RuntimeError(
+            f"model query failed after {max_retries} retries with status "
+            f"{response.status_code} (model={getattr(args, 'model', '?')}): "
+            f"{response.text[:300]}"
+        )
 
     end_time = time.time()
     print(f"Time taken to query model: {end_time - start_time:.2f} seconds")

@@ -94,7 +94,14 @@ use_wrist_camera: false
 use_parallel_ensemble: false
 use_multimodel: false
 
-visual_differencing_model: aws/anthropic/bedrock-claude-opus-4-7
+# opus-4-6, matching --model on the CLI. 4-7 was returning
+#   litellm.ServiceUnavailableError: BedrockException -
+#   "Bedrock is unable to process your request." (HTTP 503)
+# while 4-6 answered in ~2s. Because use_img_differencing is TRUE, this model is
+# called once per trial BEFORE code generation, so a dead model here stalls every
+# episode: query_model retries forever with 150-330s blind sleeps, which looks
+# exactly like a hang.
+visual_differencing_model: aws/anthropic/bedrock-claude-opus-4-6
 visual_differencing_model_server_url: https://inference-api.nvidia.com/v1/chat/completions
 output_dir: ./outputs/franka_real_franky
 debug: true
