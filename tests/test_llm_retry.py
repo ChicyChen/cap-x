@@ -111,3 +111,41 @@ class TestConfigUsesTheWorkingModel:
             "trial BEFORE code generation; a dead model here stalls every "
             f"episode. Got: {line}"
         )
+
+
+class TestDifferencingModelIsAcceptedByTheAssertion:
+    """trial.py:699 asserts the differencing model is in VLM_MODELS.
+
+    Switching visual_differencing_model to opus-4-6 (because 4-7 was 503-ing)
+    made CaP-X crash on the FIRST driver frame with
+
+        AssertionError: Image/video differencing model must be in the list of
+                        VLM models
+
+    which the driver saw only as 'no close frame received or sent'. The config
+    and the model registry must agree.
+    """
+
+    def test_the_configured_model_is_registered(self):
+        import pathlib
+        import re
+
+        from capx.llm.client import VLM_MODELS
+
+        cfg = pathlib.Path("env_configs/real/real_franky.yaml").read_text()
+        line = [
+            l for l in cfg.splitlines()
+            if l.startswith("visual_differencing_model:")
+        ][0]
+        model = line.split(":", 1)[1].strip()
+        assert model in VLM_MODELS, (
+            f"{model} is configured for image differencing but is not in "
+            f"VLM_MODELS, so trial.py:699 will assert on the first frame"
+        )
+
+    def test_img_differencing_is_actually_enabled(self):
+        """If it were off, the assertion would not fire -- keep them in sync."""
+        import pathlib
+
+        cfg = pathlib.Path("env_configs/real/real_franky.yaml").read_text()
+        assert "use_img_differencing: true" in cfg
